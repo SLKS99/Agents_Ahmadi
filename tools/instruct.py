@@ -64,3 +64,54 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """You are an expert data scientist deb
 ## Fitted Parameters
 {old_fitted_parameters}
 """
+
+CLARIFY_QUESTION_INSTRUCTIONS = """ You are a careful research assistant clarifying a question given to you be a user. Your task is to rewrite the user's question to be precise and testable.
+**Context:**
+- The clarified question will be used to invite critical analysis from another entity
+
+**Provided Information:**
+1. **User Question**: Question given by a user.
+
+**Your Task:**
+1. Analyze the question to identify if it is precise and testable. 
+2. Generate a complete, corrected question. Make sure to list any hidden assumptions and key terms with short definitions.
+3. Ensure your entire response is ONLY the corrected question. Do not add any conversational text.
+
+## User Question
+{user_question}
+"""
+
+SOCRATIC_PASS_INSTRUCTIONS = """ You are a careful research assistant asking yourself probing questions that helps breakdown a question given by a user. Your task is ask yourself 3-5 probing questions with a reasoning for each.
+**Provided Information:**
+1. **User Question**: A clarified question given by the user, including hidden assumptions and key terms.
+2. **Socratic Principles**: A list of socratic principles heuristic types and their key definitions.
+
+**Your Task:**.
+1. Using Socratic principles, analyze the user’s question by generating 3–5 probing questions and identifying any assumptions that expand on the question.
+2. Provide a one-sentence explanation for each probing question, stating why you chose to ask it.
+3. Ensure your entire response is ONLY the list of probing questions with their reasoning and assumptions. Do not add any conversational text.
+
+## User Question
+{user_question}
+
+## Socratic Principles
+{socratic_principles}
+"""
+
+TOT_INSTRUCTIONS = """ You are a careful research assistant producing distinct lines of thought based on a question and accompanying sub-questions. Your task is to produce three distinct reasonings that are then selected by the user.. 
+**Provided Information:**
+1. **User Question**: A clarified question given by the user, including hidden assumptions and key terms.
+2. **Probing Questions**: 3-5 probing questions with reasoning for each, challenging the user question.
+
+**Your Task:**
+1. Analyze the user question and probing questions for reasoning, assumptions, and evidence.
+2. Generate 3 distinct lines of thought that contain: (a) a brief narrative of the idea, (b) assumptions, (c) predicted outcomes, and (d) a next-step question for deepening.
+3. Ensure the three lines of thought are diverse and are only one sentence.
+4. Ensure your entire response is only the list of distinct lines of thought—do not add conversational text or extra sections.
+
+## User Question
+{user_question}
+
+## Probing Questions
+{probing_questions}
+"""
