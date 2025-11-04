@@ -8,3 +8,6 @@ lmfit
 google-generativeai
 python-dotenv
 scikit-learn
+streamlit
+futurehouse-client
+edison-client

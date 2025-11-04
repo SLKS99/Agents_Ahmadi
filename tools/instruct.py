@@ -98,7 +98,7 @@ SOCRATIC_PASS_INSTRUCTIONS = """ You are a careful research assistant asking you
 {socratic_principles}
 """
 
-TOT_INSTRUCTIONS = """ You are a careful research assistant producing distinct lines of thought based on a question and accompanying sub-questions. Your task is to produce three distinct reasonings that are then selected by the user.. 
+TOT_INSTRUCTIONS = """ You are a careful research assistant producing distinct lines of thought based on a question and accompanying sub-questions. Your task is to produce three distinct reasoning that are then selected by the user.. 
 **Provided Information:**
 1. **User Question**: A clarified question given by the user, including hidden assumptions and key terms.
 2. **Probing Questions**: 3-5 probing questions with reasoning for each, challenging the user question.
@@ -106,12 +106,78 @@ TOT_INSTRUCTIONS = """ You are a careful research assistant producing distinct l
 **Your Task:**
 1. Analyze the user question and probing questions for reasoning, assumptions, and evidence.
 2. Generate 3 distinct lines of thought that contain: (a) a brief narrative of the idea, (b) assumptions, (c) predicted outcomes, and (d) a next-step question for deepening.
-3. Ensure the three lines of thought are diverse and are only one sentence.
-4. Ensure your entire response is only the list of distinct lines of thought—do not add conversational text or extra sections.
+3. Ensure the three lines of thought are diverse and are only one sentence. Make sure that each thought is completely different from the next one. 
+4. Ensure your entire response is only the list of distinct lines of thought. Do not add conversational text or extra sections.
+5. Ensure that each line of thought starts with "Distinct Line of Thought".
 
 ## User Question
 {user_question}
 
 ## Probing Questions
 {probing_questions}
+"""
+
+RETRY_THINKING_INSTRUCTIONS = """ You are a careful research assistant analyzing a given thought and producing a question based on your analysis. Your task is to produce a socratic question that is precise and testable and next-step options. 
+**Provided Information:**
+1. **Line of Thought**: A line of thought selected by the user that includes: (a) a brief narrative of the idea, (b) assumptions, (c) predicted outcomes, and (d) a next-step question for further exploration.
+2. **Previous Thoughts**: Earlier lines of thought that were generated but not selected by the user.
+3. **Initial Clarified Question**: The original question that the previous thoughts were based on.
+
+**Your Task:**
+1. Analyze the provided line of thought for its core idea, underlying assumptions, predicted outcomes, and next-step questions for further exploration.
+2. Generate one Socratic question and two to three next-step options that guide the reasoning toward a precise, testable hypothesis for an experiment, based on the given line of thought and your analysis.
+3. Ensure the question and next-step options are diverse, concise (one sentence each), and do not repeat ideas from previous thoughts. Exclude a "Next-Step Options:" heading as well.
+4. Ensure each next-step option is completely distinct from the others. 
+5. Ensure your entire response is only the list of distinct lines of thought. Do not add conversational text or extra sections.
+
+## Line of Thought
+{line_of_thought}
+
+## Previous Thoughts
+{previous_thoughts_1}
+{previous_thoughts_2}
+
+## Initial Clarified Question
+{initial_clarified_question}
+"""
+
+HYPOTHESIS_SYNTHESIS = """ You are a careful research assistant analyzing a given option and socratic question to develop a hypothesis. Your task is to produce a precise and testable hypothesis for experimentation.
+**Provided Information:**
+1. **Socratic Question:** A clarified question developed from a distinct line of thought that the next-step options are based on.
+2. **Next-Step Option:** The option selected by the user, which should be analyzed, explored further, and used to generate a hypothesis.
+3. **Previous Options:** A list of next-step options that were not selected by the user.
+
+**Your Task:**
+1. Analyze the Socratic question and next-step option for their ideas, evidence, terminology, and other relevant details.
+2. Generate a precise, testable hypothesis that includes both predictions and potential tests.
+3. Ensure the hypothesis, predictions, and tests are each concise (one sentence each) and do not repeat ideas from the previous options.
+4. Include a heading with a colon on a new line for each section (e.g., Hypothesis: ..., Predictions: ...).
+5. Ensure your entire response is only the hypothesis, predictions, and tests. Do not add conversational text or extra sections.
+
+## Socratic Question
+{socratic_question}
+
+## Next-Step Option
+{next_step_option}
+
+## Previous Step Options
+{previous_step_option_1}
+{previous_step_option_2}
+"""
+
+HYPOTHESIS_ANALYSIS_REPORT = """ You are a careful research assistant analyzing a hypothesis on a set of criteria and previous research. Your task is to generate a report grading the hypothesis.
+**Provided Information:**
+1. **Hypothesis:** A precise, testable statement that includes both predictions and proposed tests.
+2. **Socratic Question:** The initial question on which the hypothesis is based.
+
+**Your Task:**
+1. Analyze the hypothesis, predictions, and tests, and evaluate them based on a search of scientific journals across the internet.
+2. Generate a report that assesses the hypothesis in terms of novelty, plausibility, and testability.
+3. Ensure your entire response is only the report. Do not add conversational text or extra sections.
+
+## Hypothesis
+{hypothesis}
+
+## Socratic Question
+{socratic_question}
 """
