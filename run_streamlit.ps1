@@ -15,9 +15,9 @@ Write-Host "API Key: $($env:GOOGLE_API_KEY.Substring(0, [Math]::Min(10, $env:GOO
 Write-Host ""
 
 # Choose which app to run (uncomment the one you want)
-# $streamlitFile = Join-Path $scriptDir "streamlit_app.py"        # Regular version
-$streamlitFile = Join-Path $scriptDir "streamlit_app_minimal.py"  # Minimal test version - USE THIS TO TEST
-# $streamlitFile = Join-Path $scriptDir "streamlit_app_clean.py"  # Clean multi-page version
+ $streamlitFile = Join-Path $scriptDir "streamlit_app.py"        # Regular version
+#$streamlitFile = Join-Path $scriptDir "streamlit_app_minimal.py"  # Minimal test version - USE THIS TO TEST
+ #$streamlitFile = Join-Path $scriptDir "streamlit_app_clean.py"  # Clean multi-page version
 
 # Fallback to regular version if clean version doesn't exist
 if (-not (Test-Path $streamlitFile)) {
@@ -33,7 +33,7 @@ if (Test-Path $streamlitFile) {
     # Performance optimizations for faster startup
     $env:STREAMLIT_SERVER_HEADLESS = "true"
     $env:STREAMLIT_BROWSER_GATHER_USAGE_STATS = "false"
-    $env:STREAMLIT_CLIENT_SHOW_SIDEBAR_NAVIGATION = "false"
+    $env:STREAMLIT_CLIENT_SHOW_SIDEBAR_NAVIGATION = "true"
 
     # Run streamlit with optimizations
     python -m streamlit run $streamlitFile --server.headless true --browser.gatherUsageStats false

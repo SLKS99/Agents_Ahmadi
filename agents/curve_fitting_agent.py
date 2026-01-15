@@ -9,10 +9,25 @@ from tools.memory import MemoryManager
 import os
 import tempfile
 import json
+import re
 from typing import Dict, Any, List, Optional
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import numpy as np
+
+
+def _sort_wells(wells: List[str]) -> List[str]:
+    """Sort wells in standard plate order: A1, A2, ..., A12, B1, B2, ..., H12"""
+    def well_key(well: str) -> tuple:
+        """Extract (row_letter, column_number) for sorting"""
+        match = re.match(r'^([A-H])(\d+)$', well.upper())
+        if match:
+            row_letter = match.group(1)
+            col_num = int(match.group(2))
+            return (row_letter, col_num)
+        return (well, 0)  # Fallback for invalid format
+    
+    return sorted(wells, key=well_key)
 
 
 def _display_fitting_plot(result: Dict[str, Any], container, well_name: str):
@@ -26,7 +41,7 @@ def _display_fitting_plot(result: Dict[str, Any], container, well_name: str):
                     read_info = f" Read {result.get('read', '')}" if result.get('read') else ""
                     st.subheader(f"📊 Well {well_name}{read_info} - R²: {result['fit_result'].stats.r2:.4f}")
                     img = mpimg.imread(plot_path)
-                    st.image(img, caption=f"Fitting plot for well {well_name}{read_info}", use_container_width=True)
+                    st.image(img, caption=f"Fitting plot for well {well_name}{read_info}", width="stretch")
                     return
         
         # If no saved plot, create one on-the-fly from data
@@ -121,7 +136,7 @@ class CurveFittingAgent(BaseAgent):
             
             self.llm_client = LLMClient(
                 provider="gemini",
-                model_id="gemini-2.5-flash-preview-image",  # Image-capable model (fallback to lite for text-only)
+                model_id="gemini-2.0-flash-lite",  # Use available model that supports both text and image
                 api_key=st.session_state.api_key,
                 min_delay_seconds=delay
             )
@@ -149,6 +164,7 @@ class CurveFittingAgent(BaseAgent):
         composition_csv_path: str,
         wells_to_analyze: Optional[List[str]] = None,
         reads_to_analyze: Optional[str] = "auto",
+        read_type: str = "em_spectrum",
         max_peaks: int = 4,
         r2_target: float = 0.90,
         max_attempts: int = 3,
@@ -156,7 +172,8 @@ class CurveFittingAgent(BaseAgent):
         start_wavelength: Optional[int] = None,
         end_wavelength: Optional[int] = None,
         wavelength_step_size: Optional[int] = None,
-        api_delay_seconds: Optional[float] = None
+        api_delay_seconds: Optional[float] = None,
+        wells_to_ignore: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Run complete curve fitting analysis using Spectropus methodology.
@@ -185,30 +202,61 @@ class CurveFittingAgent(BaseAgent):
             if not os.path.exists(composition_csv_path):
                 raise FileNotFoundError(f"Composition CSV not found: {composition_csv_path}")
 
-            # Build configuration
-            config = build_agent_config(
-                data_csv=data_csv_path,
-                composition_csv=composition_csv_path,
-                read_selection=reads_to_analyze,
-                wells_to_ignore=None if wells_to_analyze is None else [],
-                start_wavelength=start_wavelength,
-                end_wavelength=end_wavelength,
-                wavelength_step_size=wavelength_step_size,
-                fill_na_value=0.0
-            )
+            # If read_type is specified, we need to select all reads first, then filter by type
+            # Otherwise use the normal read selection
+            if read_type and read_type.lower() != "all":
+                # For read type filtering, first select all reads, then filter by type
+                config = build_agent_config(
+                    data_csv=data_csv_path,
+                    composition_csv=composition_csv_path,
+                    read_selection="all",  # Select all reads first
+                    wells_to_ignore=wells_to_ignore,
+                    start_wavelength=start_wavelength,
+                    end_wavelength=end_wavelength,
+                    wavelength_step_size=wavelength_step_size,
+                    fill_na_value=np.nan
+                )
+            else:
+                # Normal read selection
+                config = build_agent_config(
+                    data_csv=data_csv_path,
+                    composition_csv=composition_csv_path,
+                    read_selection=reads_to_analyze,
+                    wells_to_ignore=wells_to_ignore,
+                    start_wavelength=start_wavelength,
+                    end_wavelength=end_wavelength,
+                    wavelength_step_size=wavelength_step_size,
+                    fill_na_value=np.nan
+                )
 
             # Get LLM client with rate limiting delay
             llm = self._get_llm_client(min_delay_seconds=api_delay_seconds)
 
-            # Curate dataset
-            curated = curate_dataset(config)
+            # Curate dataset with read type filtering (if needed)
+            # This returns the filtered reads that match the requested type
+            if read_type and read_type.lower() != "all":
+                curated, filtered_reads = self._curate_dataset_with_read_type(config, read_type, reads_to_analyze)
+                # Use the filtered reads for analysis
+                actual_reads_to_analyze = filtered_reads
+                st.info(f"📊 Filtered to {len(filtered_reads)} {read_type} reads: {filtered_reads}")
+            else:
+                from tools.fitting_agent import CurveFitting
+                agent = CurveFitting(config)
+                curated = agent.curate_dataset()
+                actual_reads_to_analyze = reads_to_analyze
+
             available_wells = curated["wells"]
 
-            # Filter wells if specified
-            if wells_to_analyze:
+            # Filter wells (exclusion takes precedence over inclusion)
+            if wells_to_ignore:
+                wells_to_process = [w for w in available_wells if w not in wells_to_ignore]
+            elif wells_to_analyze:
                 wells_to_process = [w for w in wells_to_analyze if w in available_wells]
             else:
                 wells_to_process = available_wells
+
+            # Sort wells in standard plate order (A1, A2, ..., A12, B1, B2, ..., H12)
+            wells_to_process = _sort_wells(wells_to_process)
 
             if not wells_to_process:
                 raise ValueError("No valid wells found to analyze")
@@ -228,12 +276,12 @@ class CurveFittingAgent(BaseAgent):
                 progress_bar.progress((i) / len(wells_to_process))
 
                 try:
-                    # Run complete analysis for this well
+                    # Run complete analysis for this well using the FILTERED reads
                     result = run_complete_analysis(
                         config=config,
                         well_name=well_name,
                         llm=llm,
-                        reads=reads_to_analyze,
+                        reads=actual_reads_to_analyze,
                         max_peaks=max_peaks,
                         r2_target=r2_target,
                         max_attempts=max_attempts,
@@ -291,12 +339,107 @@ class CurveFittingAgent(BaseAgent):
                 }
 
         except Exception as e:
-            st.error(f"Curve fitting analysis failed: {str(e)}")
+            error_msg = str(e)
+            st.error(f"Curve fitting analysis failed: {error_msg}")
             return {
                 "success": False,
-                "error": str(e),
+                "error": error_msg,
                 "results": []
             }
+
+    def _curate_dataset_with_read_type(self, config: Any, read_type: str, original_read_selection: str = None) -> tuple:
+        """
+        Curate dataset with read type filtering.
+
+        Args:
+            config: Curve fitting configuration
+            read_type: Type of reads to select ("em_spectrum" or "absorbance")
+            original_read_selection: Original user read selection (e.g., "auto", "1,3")
+
+        Returns:
+            Tuple of (curated dataset with filtered reads, list of filtered read numbers)
+        """
+        from tools.fitting_agent import CurveFitting
+
+        # First curate normally (this will have all reads since we set read_selection="all")
+        agent = CurveFitting(config)
+        curated = agent.curate_dataset()
+
+        # If read_type is specified and not "all", filter the reads
+        if read_type and read_type.lower() != "all":
+            # Get the raw data to check read types
+            data, _ = CurveFitting.load_csvs(config.data_csv, config.composition_csv)
+
+            # Find all reads and their types
+            first_col = data.iloc[:, 0].astype(str)
+            read_pattern = re.compile(r"^Read\s+(\d+):(.*)$", re.I)
+
+            # Map read numbers to their types
+            read_types = {}
+            for idx, val in first_col.items():
+                m = read_pattern.match(val)
+                if m:
+                    read_num = int(m.group(1))
+                    read_desc = m.group(2).strip().lower()
+                    # Determine if this is EM spectrum or absorbance
+                    if "em spectrum" in read_desc or "emission" in read_desc or "fluorescence" in read_desc:
+                        read_types[read_num] = "em_spectrum"
+                    elif "absorbance" in read_desc or "absorption" in read_desc:
+                        read_types[read_num] = "absorbance"
+                    else:
+                        # Unknown type - include by default for now
+                        read_types[read_num] = "unknown"
+
+            # Get list of reads that match the desired type
+            matching_reads = [read_num for read_num, rtype in read_types.items()
+                            if rtype == read_type.lower()]
+
+            # If original_read_selection was specified, filter further
+            if original_read_selection and original_read_selection.lower() not in ["auto", "all"]:
+                # Parse the original selection to get desired read numbers
+                from tools.fitting_agent import CurveFittingConfig
+                try:
+                    desired_reads = CurveFittingConfig._parse_int_list(original_read_selection)
+                    # Only keep reads that are both matching type AND in the desired list
+                    final_reads = [r for r in matching_reads if r in desired_reads]
+                except:
+                    # If parsing fails, use all matching reads
+                    final_reads = matching_reads
+            else:
+                # No specific selection, use all matching reads
+                final_reads = matching_reads
+
+            # Filter blocks based on final read list
+            filtered_blocks = {}
+            for read_num in final_reads:
+                if read_num in curated["blocks"]:
+                    filtered_blocks[read_num] = curated["blocks"][read_num]
+
+            # Update curated data with filtered blocks
+            curated["blocks"] = filtered_blocks
+
+            # Update wells to only include those present in filtered reads
+            if filtered_blocks:
+                # Find common wells across filtered reads
+                well_sets = []
+                for block in filtered_blocks.values():
+                    well_cols = [str(c) for c in block.columns if str(c).strip() and str(c).strip().upper() not in ['WAVELENGTH', 'WL']]
+                    well_sets.append(set(well_cols))
+
+                if well_sets:
+                    common_wells = sorted(set.intersection(*well_sets)) if len(well_sets) > 1 else sorted(well_sets[0])
+                    curated["wells"] = common_wells
+                else:
+                    curated["wells"] = []
+            else:
+                curated["wells"] = []
+                final_reads = []
+
+            # Return both the curated data AND the list of filtered reads
+            return curated, final_reads
+
+        # If no read_type filtering, return curated data and all available reads
+        return curated, curated.get("reads", [])
 
     def analyze_single_well(
         self,
