@@ -5,6 +5,7 @@ import os
 import uuid
 import json
 import json
+import logging
 
 class MemoryManager:
     def __init__(self):
