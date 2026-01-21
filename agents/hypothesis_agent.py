@@ -107,14 +107,8 @@ class HypothesisAgent(BaseAgent):
             st.error(f"Error occurred: {e}; Please try again!")
             st.stop()
 
-    def build_conversation_context(self, prompt_session_id: str = None):
+    def build_conversation_context(self, prompt_session_id: str = st.session_state.current_prompt_session_id):
         """ Build full conversation context from all interactions """
-        if prompt_session_id is None:
-            try:
-                prompt_session_id = st.session_state.current_prompt_session_id
-            except Exception:
-                prompt_session_id = None
-
         context_parts = []
 
         # Get initial question
@@ -264,11 +258,6 @@ class HypothesisAgent(BaseAgent):
             question = st.chat_input("Ask a question...")
 
             if question:
-                # Increment usage metrics on a new hypothesis run
-                st.session_state.agent_usage_counts["hypothesis"] = (
-                    st.session_state.agent_usage_counts.get("hypothesis", 0) + 1
-                )
-
                 with st.chat_message("user"):
                     st.markdown(question)
 
