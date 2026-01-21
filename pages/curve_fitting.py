@@ -14,6 +14,12 @@ import time
 memory = MemoryManager()
 memory.init_session()
 
+# Initialize session state for well selection
+if "selected_wells" not in st.session_state:
+    st.session_state.selected_wells = set()
+if "plate_format" not in st.session_state:
+    st.session_state.plate_format = "96-well (8x12)"
+
 # Initialize curve fitting agent
 agent = CurveFittingAgent()
 
@@ -191,17 +197,12 @@ def parse_spectroscopy_csv(file_bytes: bytes, filename: str):
         # Ensure numeric types for plotting
         for col in df_regular.columns:
             try:
-                # Skip if column name itself is a common header string
-                col_str = str(col).strip().lower()
-                if col_str in ['wavelength', 'wl', 'lambda', 'nm']:
-                    # Convert wavelength column to numeric
-                    df_regular[col] = pd.to_numeric(df_regular[col], errors='coerce')
-                else:
-                    # Try to convert other columns to numeric
-                    df_regular[col] = pd.to_numeric(df_regular[col], errors='coerce')
+                # Convert all columns to numeric (wavelength and data columns)
+                df_regular[col] = pd.to_numeric(df_regular[col], errors='coerce')
             except Exception as e:
                 # If conversion fails, leave column as is
                 pass
+
 
         return df_regular
 
@@ -217,6 +218,80 @@ def load_csv_data(file_bytes: bytes, filename: str):
 # ============================================================================
 # SPECTROPUS-STYLE CURVE FITTING AGENT SECTION
 # ============================================================================
+
+def render_well_plate(format_name):
+    """Render a compact clickable well plate selector."""
+    if format_name == "96-well (8x12)":
+        rows = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+        cols = list(range(1, 13))
+    else:  # 35-well (5x7)
+        rows = ['A', 'B', 'C', 'D', 'E']
+        cols = list(range(1, 8))
+
+    # CSS for smaller circular buttons with tighter spacing
+    st.markdown("""
+        <style>
+        .well-plate-container .stButton > button {
+            border-radius: 50%;
+            width: 20px !important;
+            height: 20px !important;
+            padding: 0 !important;
+            min-width: 20px !important;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0.5px !important;
+            font-size: 8px !important;
+            font-weight: bold;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.caption("Click wells to toggle (Red = Included, Grey = Excluded)")
+    
+    # Compact selection control buttons
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("Select All", key="select_all_wells", use_container_width=True):
+            for r in rows:
+                for c in cols:
+                    st.session_state.selected_wells.add(f"{r}{c}")
+            st.rerun()
+    with c2:
+        if st.button("Clear All", key="clear_all_wells", use_container_width=True):
+            st.session_state.selected_wells = set()
+            st.rerun()
+
+    # Compact grid rendering with tighter spacing
+    # Header row for column numbers (smaller)
+    header_cols = st.columns([0.3] + [0.5] * len(cols))
+    with header_cols[0]:
+        st.write("")
+    for i, c in enumerate(cols):
+        with header_cols[i+1]:
+            st.markdown(f"<small><b>{c}</b></small>", unsafe_allow_html=True)
+
+    # Well grid with tighter spacing
+    for r in rows:
+        row_cols = st.columns([0.3] + [0.5] * len(cols))
+        with row_cols[0]:
+            st.markdown(f"<small><b>{r}</b></small>", unsafe_allow_html=True)
+        for i, c in enumerate(cols):
+            well_id = f"{r}{c}"
+            is_selected = well_id in st.session_state.selected_wells
+            with row_cols[i+1]:
+                if st.button(
+                    "",  # Empty button - no text inside circle
+                    key=f"btn_{well_id}",
+                    help=f"Well {well_id}",
+                    type="primary" if is_selected else "secondary",
+                    use_container_width=True
+                ):
+                    if is_selected:
+                        st.session_state.selected_wells.remove(well_id)
+                    else:
+                        st.session_state.selected_wells.add(well_id)
+                    st.rerun()
 
 # File upload section
 st.header("📁 Data Upload")
@@ -302,15 +377,25 @@ with col2:
         help="Maximum fitting attempts per well (includes model switching)"
     )
 
+    # Read type selection
+    st.markdown("**Read Type Selection**")
+    read_type = st.radio(
+        "What type of reads do you want to analyze?",
+        ["PL Reads (EM Spectrum)", "Absorbance Reads"],
+        index=0,
+        help="Choose the type of spectroscopic reads to analyze. PL reads are emission spectra, absorbance reads are absorption spectra."
+    )
+
     # Read selection with multiple options
     st.markdown("**Read Selection**")
-    st.caption("💡 Note: Only EM Spectrum reads are analyzed. Absorbance reads are automatically excluded.")
-    
+    read_type_desc = "EM Spectrum" if "PL" in read_type else "Absorbance"
+    st.caption(f"💡 Note: Only {read_type_desc} reads will be analyzed. Other read types are automatically excluded.")
+
     read_mode = st.radio(
         "Select reads to analyze:",
         ["Auto (first read)", "All reads", "Range", "Odd/Even", "Specific reads", "Custom (advanced)"],
         index=0,
-        help="Choose how to select which reads to analyze. Only EM Spectrum reads will be processed."
+        help=f"Choose how to select which {read_type_desc.lower()} reads to analyze."
     )
     
     reads_selection = "auto"  # Default
@@ -350,11 +435,21 @@ with col2:
         st.info("Advanced: Use any valid format")
 
 with col3:
-    wells_input = st.text_area(
-        "Wells to Analyze (optional)",
-        height=100,
-        help="Leave empty for all wells, or specify comma-separated well names (e.g., A1,B2,C3)"
+    st.markdown("**Well Selection Mode**")
+    plate_format = st.selectbox(
+        "Select Plate Format",
+        ["96-well (8x12)", "35-well (5x7)"],
+        index=0 if st.session_state.plate_format == "96-well (8x12)" else 1,
+        key="plate_format_selector"
     )
+    if plate_format != st.session_state.plate_format:
+        st.session_state.plate_format = plate_format
+        # Optional: Clear selection when changing format
+        # st.session_state.selected_wells = set()
+        st.rerun()
+    
+    # Compact well plate selector right below format selection
+    render_well_plate(st.session_state.plate_format)
 
     save_plots = st.checkbox("Save Fitting Plots", value=True, help="Generate and save fitting visualization plots")
     
@@ -467,10 +562,45 @@ if run_button:
         with open(comp_path, "wb") as f:
             f.write(composition_file.getvalue())
 
-        # Parse wells input
-        wells_to_analyze = None
-        if wells_input.strip():
-            wells_to_analyze = [w.strip().upper() for w in wells_input.split(",") if w.strip()]
+        # Determine wells to analyze based on visual selection
+        # If no wells selected, default to all wells (passing None to the agent)
+        wells_to_analyze = list(st.session_state.selected_wells) if st.session_state.selected_wells else None
+        
+        # Determine read type for filtering
+        read_type_filter = "em_spectrum" if "PL" in read_type else "absorbance"
+
+        # Quick validation: Analyze read types to ensure selection is valid
+        with tempfile.TemporaryDirectory() as debug_temp_dir:
+            debug_data_path = os.path.join(debug_temp_dir, "debug_data.csv")
+            with open(debug_data_path, "wb") as f:
+                f.write(data_file.getvalue())
+
+            # Quick analysis of read headers
+            debug_data = pd.read_csv(debug_data_path, header=None)
+            first_col = debug_data.iloc[:, 0].astype(str)
+            read_pattern = re.compile(r"^Read\s+(\d+):(.*)$", re.I)
+
+            read_analysis = {"em_spectrum": [], "absorbance": [], "unknown": []}
+            for idx, val in first_col.items():
+                m = read_pattern.match(val)
+                if m:
+                    read_num = int(m.group(1))
+                    read_desc = m.group(2).strip().lower()
+
+                    if "em spectrum" in read_desc or "emission" in read_desc or "fluorescence" in read_desc:
+                        read_analysis["em_spectrum"].append(read_num)
+                    elif "absorbance" in read_desc or "absorption" in read_desc:
+                        read_analysis["absorbance"].append(read_num)
+                    else:
+                        read_analysis["unknown"].append(read_num)
+
+        # Check if the requested read type exists
+        if read_type_filter == "absorbance" and not read_analysis["absorbance"]:
+            st.error("❌ No absorbance reads found in your data file! Only EM Spectrum reads are available.")
+            st.stop()
+        elif read_type_filter == "em_spectrum" and not read_analysis["em_spectrum"]:
+            st.error("❌ No EM Spectrum reads found in your data file! Check your data format.")
+            st.stop()
 
         # Create progress tracking
         progress_bar = st.progress(0)
@@ -484,7 +614,9 @@ if run_button:
                 data_csv_path=data_path,
                 composition_csv_path=comp_path,
                 wells_to_analyze=wells_to_analyze,
+                wells_to_ignore=None,
                 reads_to_analyze=reads_selection,
+                read_type=read_type_filter,
                 max_peaks=max_peaks,
                 r2_target=r2_target,
                 max_attempts=max_attempts,
@@ -557,7 +689,7 @@ if run_button:
                                 # Load and display the matplotlib plot
                                 import matplotlib.image as mpimg
                                 img = mpimg.imread(plot_path)
-                                st.image(img, caption=f"Fitting plot for well {well_name}", use_container_width=True)
+                                st.image(img, caption=f"Fitting plot for well {well_name}", width="stretch")
 
                                 # Add download button for the plot
                                 with open(plot_path, "rb") as file:

@@ -44,3 +44,10 @@ logs/
 
 # Anaconda projects
 anaconda_projects/db/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+*.exe
+*.app

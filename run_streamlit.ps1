@@ -14,22 +14,31 @@ Write-Host "Current directory: $(Get-Location)"
 Write-Host "API Key: $($env:GOOGLE_API_KEY.Substring(0, [Math]::Min(10, $env:GOOGLE_API_KEY.Length)))..."
 Write-Host ""
 
-# Verify file exists
-$streamlitFile = Join-Path $scriptDir "streamlit_app.py"
+# Choose which app to run (uncomment the one you want)
+ $streamlitFile = Join-Path $scriptDir "streamlit_app.py"        # Regular version
+#$streamlitFile = Join-Path $scriptDir "streamlit_app_minimal.py"  # Minimal test version - USE THIS TO TEST
+ #$streamlitFile = Join-Path $scriptDir "streamlit_app_clean.py"  # Clean multi-page version
+
+# Fallback to regular version if clean version doesn't exist
+if (-not (Test-Path $streamlitFile)) {
+    Write-Host "Clean version not found, falling back to regular version..."
+    $streamlitFile = Join-Path $scriptDir "streamlit_app.py"
+}
+
 if (Test-Path $streamlitFile) {
-    Write-Host "Found streamlit_app.py at: $streamlitFile"
+    Write-Host "Found $($streamlitFile | Split-Path -Leaf) at: $streamlitFile"
     Write-Host "Starting Streamlit app (optimized for speed)..."
     Write-Host ""
 
     # Performance optimizations for faster startup
     $env:STREAMLIT_SERVER_HEADLESS = "true"
     $env:STREAMLIT_BROWSER_GATHER_USAGE_STATS = "false"
-    $env:STREAMLIT_CLIENT_SHOW_SIDEBAR_NAVIGATION = "false"
+    $env:STREAMLIT_CLIENT_SHOW_SIDEBAR_NAVIGATION = "true"
 
     # Run streamlit with optimizations
     python -m streamlit run $streamlitFile --server.headless true --browser.gatherUsageStats false
 } else {
-    Write-Host "Error: streamlit_app.py not found!"
+    Write-Host "Error: No streamlit app file found!"
     Write-Host "Expected location: $streamlitFile"
     Write-Host "Current directory: $(Get-Location)"
     Write-Host ""

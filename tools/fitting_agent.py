@@ -101,9 +101,9 @@ class LLMClient:
 
             # Store API key and model IDs for reference
             self.api_key = key
-            # Use image-capable model as primary, with fallback for text-only
+            # Use available models - gemini-2.0-flash-lite for both text and image operations
             self.model_id_image = model_id or "gemini-2.5-flash-preview-image"  # For image analysis
-            self.model_id_text = "gemini-2.5-flash-lite"  # Fallback for text-only calls
+            self.model_id_text = "gemini-2.0-flash-lite"  # For text-only calls
             self.model_id = self.model_id_image  # Default to image model
             
             # Store models separately for lazy loading
@@ -289,21 +289,40 @@ class LLMClient:
                                     return candidate.content.parts[0].text
                         return resp.text
 
-                # Make the API call - use image-capable model
-                try:
-                    resp = self._model_image.generate_content(parts, generation_config={"max_output_tokens": int(max_tokens)})
-                except Exception as api_error:
-                    # If image model API call fails, fallback to text model with text-only input
-                    if "image" in str(api_error).lower() or "multimodal" in str(api_error).lower():
-                        logging.warning(f"Image model API call failed: {api_error}")
-                        logging.warning(f"Falling back to text-only model {self.model_id_text}")
-                        if self._model_text is None:
-                            self._model_text = genai.GenerativeModel(self.model_id_text)
-                        # Extract text part only for fallback
-                        text_part = parts[0] if parts else ""
-                        resp = self._model_text.generate_content(text_part, generation_config={"max_output_tokens": int(max_tokens)})
-                    else:
-                        raise
+                # Make the API call - use image-capable model with retry for transient errors
+                import time
+                max_retries = 3
+                retry_delay = 2  # seconds
+                
+                for attempt in range(max_retries):
+                    try:
+                        resp = self._model_image.generate_content(parts, generation_config={"max_output_tokens": int(max_tokens)})
+                        break  # Success, exit retry loop
+                    except Exception as api_error:
+                        error_str = str(api_error).lower()
+                        
+                        # Check for transient errors (500, 503, rate limit)
+                        is_transient = any(x in error_str for x in ['500', '503', 'internal', 'overloaded', 'rate limit', 'quota'])
+                        
+                        if is_transient and attempt < max_retries - 1:
+                            logging.warning(f"Transient API error (attempt {attempt + 1}/{max_retries}): {api_error}")
+                            logging.warning(f"Retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                            continue
+                        
+                        # If image model API call fails, fallback to text model with text-only input
+                        if "image" in error_str or "multimodal" in error_str:
+                            logging.warning(f"Image model API call failed: {api_error}")
+                            logging.warning(f"Falling back to text-only model {self.model_id_text}")
+                            if self._model_text is None:
+                                self._model_text = genai.GenerativeModel(self.model_id_text)
+                            # Extract text part only for fallback
+                            text_part = parts[0] if parts else ""
+                            resp = self._model_text.generate_content(text_part, generation_config={"max_output_tokens": int(max_tokens)})
+                            break
+                        else:
+                            raise
                 # Check if response has valid candidates with parts
                 if resp.candidates and len(resp.candidates) > 0:
                     candidate = resp.candidates[0]
@@ -379,12 +398,25 @@ except Exception:
 def save_plot_png(x: np.ndarray, y: np.ndarray, outfile: str, *, title: Optional[str] = None) -> str:
     if not _HAS_MPL:
         raise RuntimeError("matplotlib is required for save_plot_png")
-    plt.figure()
-    plt.plot(x, y)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(x, y, 'b-', linewidth=1.5, label='Spectrum')
     if title:
-        plt.title(title)
-    plt.xlabel("x")
-    plt.ylabel("y")
+        ax.set_title(title, fontsize=14)
+    ax.set_xlabel("Wavelength (nm)", fontsize=12)
+    ax.set_ylabel("Intensity", fontsize=12)
+    
+    # Add grid for easier peak identification
+    ax.grid(True, alpha=0.3)
+    
+    # Mark the data range
+    y_min, y_max = np.nanmin(y), np.nanmax(y)
+    ax.set_ylim(y_min - 0.05 * (y_max - y_min), y_max + 0.1 * (y_max - y_min))
+    
+    # Add text annotation with key info for LLM
+    info_text = f"X range: {x.min():.0f}-{x.max():.0f} nm\nY range: {y_min:.0f}-{y_max:.0f}"
+    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
     plt.tight_layout()
     plt.savefig(outfile, dpi=200)
     plt.close()
@@ -572,53 +604,48 @@ def save_fitting_plot_png(x: np.ndarray, y: np.ndarray, fit_result: PeakFitResul
     # Create figure with subplots
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
 
-    # Top plot: Original data and fit
+    # Top plot: Original data
     ax1.plot(x, y, 'b-', linewidth=2, label='Original data', alpha=0.8)
 
-    # CRITICAL FIX: Use the actual lmfit result instead of manual reconstruction
+    # Use the actual lmfit result for the fit
     if hasattr(fit_result, 'lmfit_result') and fit_result.lmfit_result is not None:
-        # Use the actual lmfit best_fit
         fit_y = fit_result.lmfit_result.best_fit
-
+        
         # Plot individual peak components from lmfit
         colors = ['green', 'orange', 'purple', 'brown', 'pink', 'gray']
         try:
-            # Get individual components from lmfit result
             components = fit_result.lmfit_result.eval_components(x=x)
+            # Find the baseline component name (usually 'c_')
+            base_comp_name = next((name for name in components.keys() if name.startswith('c_')), None)
+            
             for i, (comp_name, comp_y) in enumerate(components.items()):
-                if comp_name != 'c_':  # Skip baseline component
-                    ax1.plot(x, comp_y, '--', color=colors[i % len(colors)],
+                if comp_name != base_comp_name:
+                    # Add baseline back to individual peaks so they sit on the baseline
+                    baseline_val = components[base_comp_name] if base_comp_name else 0
+                    ax1.plot(x, comp_y + baseline_val, '--', color=colors[i % len(colors)],
                             alpha=0.6, linewidth=1, label=f'Peak {comp_name}')
         except:
-            # Fallback: show peaks as vertical lines at centers
-            for i, peak in enumerate(fit_result.peaks):
-                ax1.axvline(peak.center, color=colors[i % len(colors)],
-                           linestyle='--', alpha=0.6, label=f'Peak {i+1} center')
+            pass
     else:
-        # Fallback to manual reconstruction (old method)
+        # Fallback to manual reconstruction
         fit_y = np.full_like(y, fit_result.baseline or 0.0)
-        colors = ['green', 'orange', 'purple', 'brown', 'pink', 'gray']
-
         for i, peak in enumerate(fit_result.peaks):
             if peak.fwhm:
-                # Convert FWHM to sigma
                 sigma = peak.fwhm / 2.354820045
-                # Generate individual peak curve (Gaussian approximation)
                 peak_y = peak.height * np.exp(-((x - peak.center) / sigma) ** 2 / 2)
                 fit_y += peak_y
-                ax1.plot(x, peak_y, '--', color=colors[i % len(colors)],
-                        alpha=0.6, linewidth=1, label=f'Peak {i+1}')
 
-    ax1.plot(x, fit_y, 'r--', linewidth=2, label='Total Fit', alpha=0.9)
+    # Plot ONLY the one true best fit
+    ax1.plot(x, fit_y, 'r-', linewidth=2, label='Total Fit')
 
     ax1.set_xlabel('Wavelength (nm)')
     ax1.set_ylabel('Intensity')
-    plot_title = title or f'Peak Fitting Results\nR² = {fit_result.stats.r2:.4f}, χ² = {fit_result.stats.redchi:.1f}'
+    plot_title = title or f'Peak Fitting Results\nR² = {fit_result.stats.r2:.4f}'
     ax1.set_title(plot_title)
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # Bottom plot: Residuals - USE CORRECT FIT DATA
+    # Bottom plot: Residuals - MUST use the same fit_y as above
     residuals = y - fit_y
     ax2.plot(x, residuals, 'g-', linewidth=1, label='Residuals')
     ax2.axhline(y=0, color='black', linestyle='--', alpha=0.5)
@@ -1010,46 +1037,80 @@ def llm_refine_peaks_from_residuals(llm: LLMClient, x: np.ndarray, y: np.ndarray
                                    well_name: str, max_peaks: int = 3) -> PeakResult:
     """Let LLM refine peak positions based on fit residuals."""
 
-    # Create residual analysis for LLM
-    residual_info = f"""
-    Current fit analysis for Well {well_name}:
+    # Format current peaks as JSON-like structure
+    current_peaks_json = [
+        {"center": p.center, "height": p.height, "fwhm": p.fwhm if p.fwhm else 20.0}
+        for p in current_peaks
+    ]
+    
+    # Downsample residuals to include in the prompt so LLM can "see" them
+    res_x, res_y = _downsample_xy(x, residuals, max_points=100)
+    residuals_data = [{"x": float(rx), "res": float(ry)} for rx, ry in zip(res_x, res_y)]
 
-    Current peaks:
-    {[f"Peak {i+1}: center={p.center:.1f}nm, height={p.height:.1f}, FWHM={p.fwhm:.1f}nm"
-      for i, p in enumerate(current_peaks)]}
+    refinement_prompt = f"""You are a spectroscopy peak fitting assistant. Analyze the fit residuals and suggest refined peak parameters.
 
-    Residual analysis:
-    - Max positive residual: {residuals.max():.1f} (suggests missing peaks or underfit)
-    - Max negative residual: {residuals.min():.1f} (suggests overfit or wrong positions)
-    - Residual std: {residuals.std():.1f}
-    - Residual pattern shows systematic deviations that need correction
-    """
+IMPORTANT: Return ONLY a valid JSON object. No explanations, no prose, no markdown. Just JSON.
 
-    refinement_prompt = f"""
-    {residual_info}
+Current fit for Well {well_name}:
+- Wavelength range: {x.min():.1f} - {x.max():.1f} nm
+- Max peaks allowed: {max_peaks}
+- Current peak parameters: {json.dumps(current_peaks_json)}
 
-    Based on the residuals, please suggest refined peak parameters.
-    Return ONLY JSON with keys 'peaks' (list) and 'baseline'.
+Residual Statistics:
+- Max positive residual: {residuals.max():.1f} (If high, the fit is too LOW at this position)
+- Max negative residual: {residuals.min():.1f} (If very negative, the fit is too HIGH at this position)
+- Residual std: {residuals.std():.1f}
 
-    Wavelength range: {x.min():.1f} - {x.max():.1f} nm
-    Max peaks allowed: {max_peaks}
+Residual Data (Downsampled):
+{json.dumps(residuals_data)}
 
-    Focus on fixing systematic residual patterns, not random noise.
-    """
+TASK:
+1. Look at the Residual Data. 
+2. If you see large positive residuals (res > 10% of peak height), increase the 'height' of the peak at that 'x' position.
+3. If you see a systematic "hump" in residuals where there is no peak, add a new peak.
+4. Suggest refined centers, heights, and widths.
+
+Output refined peak parameters in this EXACT JSON format:
+{{"peaks": [{{"center": 780.0, "height": 1400.0, "fwhm": 50.0}}], "baseline": 0.0}}
+
+Return ONLY the JSON object, nothing else."""
 
     try:
         response = llm.generate(refinement_prompt, max_tokens=500)
-        obj = _extract_json(response)
+        
+        # Try to extract JSON from response
+        try:
+            obj = _extract_json(response)
+        except ValueError:
+            # If no JSON found, the LLM returned prose - use original peaks
+            print(f"  LLM returned prose instead of JSON, using original peaks")
+            return PeakResult(peaks=current_peaks, baseline=None)
 
-        refined_peaks = [
-            PeakGuess(
-                center=float(p.get("center")),
-                height=float(p.get("height")),
-                fwhm=(float(p["fwhm"]) if p.get("fwhm") is not None else None),
-                prominence=(float(p["prominence"]) if p.get("prominence") is not None else None),
-            )
-            for p in obj.get("peaks", [])
-        ]
+        # Validate that we got actual peak data
+        peaks_data = obj.get("peaks", [])
+        if not peaks_data or not isinstance(peaks_data, list):
+            print(f"  LLM response missing peaks array, using original peaks")
+            return PeakResult(peaks=current_peaks, baseline=None)
+
+        refined_peaks = []
+        for p in peaks_data:
+            # Validate each peak has required fields
+            if not isinstance(p, dict) or "center" not in p or "height" not in p:
+                continue
+            try:
+                refined_peaks.append(PeakGuess(
+                    center=float(p.get("center")),
+                    height=float(p.get("height")),
+                    fwhm=(float(p["fwhm"]) if p.get("fwhm") is not None else None),
+                    prominence=(float(p["prominence"]) if p.get("prominence") is not None else None),
+                ))
+            except (ValueError, TypeError):
+                # Skip invalid peaks
+                continue
+
+        if not refined_peaks:
+            print(f"  No valid peaks in LLM response, using original peaks")
+            return PeakResult(peaks=current_peaks, baseline=None)
 
         base = obj.get("baseline")
         return PeakResult(peaks=refined_peaks, baseline=(float(base) if base is not None else None))
@@ -1061,6 +1122,13 @@ def llm_refine_peaks_from_residuals(llm: LLMClient, x: np.ndarray, y: np.ndarray
 
 def select_model_for_spectrum(llm: LLMClient, x: np.ndarray, y: np.ndarray, well_name: str) -> str:
     """Let LLM select the appropriate model type for the spectrum."""
+    # Validate inputs
+    if len(x) == 0 or len(y) == 0:
+        raise ValueError(f"Empty arrays for well {well_name}: x has {len(x)} points, y has {len(y)} points")
+    
+    if len(x) != len(y):
+        raise ValueError(f"Array length mismatch for well {well_name}: x has {len(x)} points, y has {len(y)} points")
+    
     # Create a simple spectrum summary for LLM
     spectrum_summary = f"""
     Spectrum for Well {well_name}:
@@ -1111,8 +1179,7 @@ def run_complete_analysis(
     model_kind: Optional[str] = None,
     r2_target: float = 0.90,
     max_attempts: int = 3,
-    save_plots: bool = True,  # Set to False to skip saving final PNG files (LLM analysis still runs)
-    status_callback: Optional[callable] = None  # Callback function(status, details, r2, model, attempt_num) for real-time updates
+    save_plots: bool = True  # Set to False to skip saving final PNG files (LLM analysis still runs)
 ) -> Union[Dict[str, object], List[Dict[str, object]]]:
     """Run complete analysis workflow for a single well with flexible read selection."""
 
@@ -1157,11 +1224,11 @@ def run_complete_analysis(
         print(f"    Processing read {read}...")
         x, y = get_xy_for_well(config, well_name, read=read)
 
-        # LLM numeric analysis
+        # LLM numeric analysis (backup)
         sys_prompt_numeric = get_prompt("numeric")
         llm_result = llm_guess_peaks(llm, x, y, use_image=False, system_prompt=sys_prompt_numeric, max_peaks=max_peaks)
 
-        # LLM image analysis (create temp image, analyze, delete immediately)
+        # LLM image analysis (PRIMARY - visual analysis is more reliable)
         temp_spectrum_path = f'analysis_output/temp_spectrum_{well_name}_read{read}.png'
         save_plot_png(x, y, temp_spectrum_path, title=f'PL Spectrum - Well {well_name} Read {read}')
 
@@ -1174,9 +1241,14 @@ def run_complete_analysis(
         except:
             pass
 
+        # Use IMAGE-based result for fitting (more reliable than numeric)
+        # Fall back to numeric if image result has no peaks
+        peaks_to_use = llm_image_result if llm_image_result.peaks else llm_result
+        print(f"      Using {'image' if llm_image_result.peaks else 'numeric'}-based peaks: {len(peaks_to_use.peaks)} peaks")
+
         # lmfit fitting with retry logic
         fit_result = fit_peaks_lmfit_with_retry(
-            x, y, llm_result,
+            x, y, peaks_to_use,
             model_kind=model_kind,
             r2_target=0.92,
             max_attempts=max_attempts
@@ -1207,8 +1279,30 @@ def run_complete_analysis(
             # LLM refinement based on residuals
             if fit_result.lmfit_result is not None:
                 current_residuals = y - fit_result.lmfit_result.best_fit
+                
+                # Manual boost if residuals are huge (Residual peak > 20% of data peak)
+                y_max = np.nanmax(y)
+                res_max = np.nanmax(current_residuals)
+                
+                # Copy peaks to avoid modifying previous results
+                boosted_peaks = [
+                    PeakGuess(center=p.center, height=p.height, fwhm=p.fwhm, prominence=p.prominence)
+                    for p in fit_result.peaks
+                ]
+                
+                if res_max > 0.15 * y_max:
+                    print(f"      Large residuals detected ({res_max:.1f}). Attempting manual peak boost.")
+                    for pk in boosted_peaks:
+                        # Find residual at peak center
+                        c_idx = np.argmin(np.abs(x - pk.center))
+                        res_at_center = current_residuals[c_idx]
+                        if res_at_center > 0.05 * y_max:
+                            # Boost height by the residual amount to force convergence
+                            pk.height = (pk.height or 0) + res_at_center
+                
+                # Use BOOSTED peaks for LLM refinement input
                 refined_peaks = llm_refine_peaks_from_residuals(
-                    llm, x, y, fit_result.peaks, current_residuals, well_name, max_peaks
+                    llm, x, y, boosted_peaks, current_residuals, well_name, max_peaks
                 )
                 print(f"      LLM refined peaks: {len(refined_peaks.peaks)} peaks")
             else:
@@ -1429,7 +1523,8 @@ def _estimate_sigma_from_fwhm(fwhm: float) -> float:
     return float(fwhm) / 2.354820045  # FWHM = 2*sqrt(2*ln2)*sigma
 
 
-def _guess_sigma_from_span(x: np.ndarray, frac: float = 0.02) -> float:
+def _guess_sigma_from_span(x: np.ndarray, frac: float = 0.08) -> float:
+    """Guess sigma as a fraction of the x span. Default 8% for typical PL peaks."""
     span = float(np.max(x) - np.min(x))
     return max(1e-6, frac * span)
 
@@ -1461,29 +1556,75 @@ def _build_composite_model(
     if center_window is None:
         center_window = 0.10 * span
     if sigma_bounds is None:
-        sigma_bounds = (max(1e-6, 0.002 * span), max(1e-6, 0.20 * span))
+        # Allow wide sigma range - PL peaks can be quite broad (up to 40% of span)
+        sigma_bounds = (max(1e-6, 0.005 * span), max(1e-6, 0.40 * span))
 
     model = ConstantModel(prefix="c_")
     params = model.make_params()
-    base_val = float(baseline) if baseline is not None else float(np.nanmin(y))
-    params["c_c"].set(value=base_val, min=-np.inf, max=np.inf)
+    
+    # For baseline, use the minimum of the data or provided value
+    # Constrain baseline to be reasonable (near the data minimum, not above data)
+    y_min = float(np.nanmin(y))
+    y_max = float(np.nanmax(y))
+    y_range = y_max - y_min
+    
+    base_val = float(baseline) if baseline is not None else y_min
+    # Constrain baseline to be at most slightly above the data minimum
+    # and at least somewhat below (to allow for negative baseline if needed)
+    baseline_max = y_min + 0.1 * y_range  # Baseline can't be more than 10% above minimum
+    baseline_min = y_min - 0.5 * y_range  # Allow some negative baseline
+    params["c_c"].set(value=base_val, min=baseline_min, max=baseline_max)
 
     for i, pk in enumerate(peaks):
         prefix = f"p{i}_"
         comp = select_peak_model(model_kind)(prefix=prefix)
         model = model + comp
 
+        c0 = float(pk.center)
+        
+        # Find the closest x index to the peak center
+        center_idx = np.argmin(np.abs(x - c0))
+        actual_height_at_center = float(y[center_idx]) - base_val  # Height above baseline
+        
+        # Estimate FWHM from the actual data if not provided by LLM
         if pk.fwhm and pk.fwhm > 0:
             sigma0 = _estimate_sigma_from_fwhm(pk.fwhm)
         else:
-            sigma0 = _guess_sigma_from_span(x)
-
-        amp0 = _height_to_gaussian_amplitude(pk.height, sigma0) if pk.height is not None else \
-            float(np.trapz(y, x) / max(1, len(peaks)))
+            # Try to estimate FWHM from the data by finding half-max points
+            half_max = base_val + actual_height_at_center / 2
+            
+            # Find left half-max point
+            left_idx = center_idx
+            while left_idx > 0 and y[left_idx] > half_max:
+                left_idx -= 1
+            
+            # Find right half-max point
+            right_idx = center_idx
+            while right_idx < len(y) - 1 and y[right_idx] > half_max:
+                right_idx += 1
+            
+            # Calculate FWHM from data
+            if right_idx > left_idx:
+                estimated_fwhm = float(x[right_idx] - x[left_idx])
+                # Sanity check: FWHM should be reasonable (5-200nm for PL)
+                if 5 < estimated_fwhm < 200:
+                    sigma0 = _estimate_sigma_from_fwhm(estimated_fwhm)
+                else:
+                    sigma0 = _guess_sigma_from_span(x)
+            else:
+                sigma0 = _guess_sigma_from_span(x)
+        
+        # Use actual data height - always trust the data over LLM for intensity
+        if actual_height_at_center > 0:
+            peak_height = actual_height_at_center
+        else:
+            # Fallback: use LLM height or estimate from data range
+            peak_height = pk.height if pk.height and pk.height > 0 else y_range * 0.5
+        
+        amp0 = _height_to_gaussian_amplitude(peak_height, sigma0)
 
         p = comp.make_params()
         p[f"{prefix}amplitude"].set(value=float(amp0), min=0.0, max=np.inf)
-        c0 = float(pk.center)
         p[f"{prefix}center"].set(value=c0, min=c0 - center_window, max=c0 + center_window)
         p[f"{prefix}sigma"].set(value=float(sigma0), min=sigma_bounds[0], max=sigma_bounds[1])
 
@@ -1504,7 +1645,16 @@ def _fit_once(
     model_kind: str = "gaussian",
 ) -> lmfit.model.ModelResult:
     model, params = _build_composite_model(x, y, peaks, baseline, model_kind=model_kind)
-    return model.fit(y, params, x=x, nan_policy="omit", max_nfev=10000)
+    
+    # Add weights to emphasize peak matching
+    # Higher y values get more weight to force better peak height matching
+    y_min, y_max = np.nanmin(y), np.nanmax(y)
+    y_range = y_max - y_min + 1e-9
+    y_norm = (y - y_min) / y_range
+    # Higher weights at the top of peaks (up to 10x base weight)
+    weights = 1.0 + 9.0 * (y_norm ** 2) 
+    
+    return model.fit(y, params, x=x, weights=weights, nan_policy="omit", max_nfev=10000)
 
 
 def _score_fit(y: np.ndarray, yhat: np.ndarray) -> Tuple[float, float]:
@@ -1665,7 +1815,7 @@ class CurveFittingConfig:
     read_selection: Union[str, Iterable[int], None] = "all"
     wells_to_ignore: Union[str, Iterable[str], None] = None
 
-    fill_na_value: float = 0.0
+    fill_na_value: float = np.nan
 
     @staticmethod
     def _parse_int_list(text: str) -> List[int]:
@@ -1729,7 +1879,10 @@ class CurveFittingConfig:
 
 
 class CurveFitting:
-    READ_HEADER_PATTERN = re.compile(r"^Read\s+(\d+):EM\s+Spectrum\s*$", re.I)
+    # Generic pattern to find boundaries of ANY read block
+    READ_HEADER_PATTERN = re.compile(r"^Read\s+(\d+):", re.I)
+    # Specific pattern for the target data type (PL)
+    TARGET_TYPE_PATTERN = re.compile(r"EM\s+Spectrum", re.I)
 
     def __init__(self, config: CurveFittingConfig):
         self.cfg = config
@@ -1745,6 +1898,7 @@ class CurveFitting:
 
     @classmethod
     def _find_read_block_starts(cls, data: pd.DataFrame) -> Dict[int, int]:
+        """Find the start row of every 'Read N:' block to determine boundaries."""
         starts: Dict[int, int] = {}
         first_col = data.iloc[:, 0].astype(str)
         for idx, val in first_col.items():
@@ -1752,19 +1906,32 @@ class CurveFitting:
             if m:
                 starts[int(m.group(1))] = idx
         if not starts:
-            raise ValueError("No 'Read N:EM Spectrum' blocks found in data CSV")
+            raise ValueError("No 'Read N:' blocks found in data CSV")
         return dict(sorted(starts.items()))
 
     @staticmethod
     def _slice_block(data: pd.DataFrame, start_row: int, end_row: Optional[int]) -> pd.DataFrame:
+        """Slice a data block from the raw CSV, stopping at the first empty row."""
         end = end_row if end_row is not None else len(data)
-        block = data.iloc[start_row + 2 : end - 1].copy()
+        block_full = data.iloc[start_row + 2 : end].copy()
+        
+        # Find the first row that is entirely empty or NaNs
+        # This stops the block before it hits summary tables at the end of the file
+        empty_rows = block_full.isnull().all(axis=1)
+        if empty_rows.any():
+            first_empty = np.where(empty_rows)[0][0]
+            block = block_full.iloc[:first_empty].copy()
+        else:
+            block = block_full.copy()
+
         if 0 in block.columns:
             block = block.drop(columns=[0])
-        new_header = block.iloc[0]
-        block = block.iloc[1:]
-        block.columns = new_header
-        block = block.apply(pd.to_numeric, errors="coerce")
+        
+        if len(block) > 0:
+            new_header = block.iloc[0]
+            block = block.iloc[1:]
+            block.columns = new_header
+            block = block.apply(pd.to_numeric, errors="coerce")
         return block
 
     @classmethod
@@ -1798,11 +1965,130 @@ class CurveFitting:
 
     @staticmethod
     def infer_wavelength_vector(df: pd.DataFrame) -> np.ndarray:
+        """Infer wavelength vector from dataframe.
+        
+        First checks for a 'Wavelength' column, then checks first column if numeric,
+        then falls back to index-based.
+        """
+        # Strategy 1: Check for explicit wavelength column names
+        wl_col = None
+        for col in df.columns:
+            col_str = str(col).strip().upper()
+            # More flexible matching - check if column name contains wavelength-related terms
+            if any(term in col_str for term in ['WAVELENGTH', 'WL', 'LAMBDA', 'NM']) and \
+               not any(term in col_str for term in ['WELL', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']):
+                # Also check if it looks like numeric data (not well names)
+                try:
+                    sample_val = pd.to_numeric(df[col].iloc[0] if len(df) > 0 else None, errors='coerce')
+                    if not np.isnan(sample_val) and sample_val > 100:  # Wavelengths are typically > 100nm
+                        wl_col = col
+                        break
+                except:
+                    pass
+        
+        # Strategy 2: Check first column if it looks like wavelengths (common CSV format)
+        if wl_col is None and len(df.columns) > 0:
+            first_col = df.columns[0]
+            first_col_str = str(first_col).strip().upper()
+            # If first column is not a well name, check if it contains wavelength values
+            is_well_name = bool(re.match(r'^[A-H](?:[1-9]|1[0-2])$', first_col_str))
+            if not is_well_name:
+                try:
+                    # Check if first column has numeric values in wavelength range
+                    # Use more rows to be confident
+                    sample_vals = pd.to_numeric(df[first_col].head(10), errors='coerce').values
+                    valid_samples = sample_vals[~np.isnan(sample_vals)]
+                    if len(valid_samples) >= 3:  # Need at least 3 valid samples
+                        sample_min, sample_max = float(valid_samples.min()), float(valid_samples.max())
+                        # If values are in reasonable wavelength range (100-2000 nm), use it
+                        # Also check that values are increasing (wavelengths should be monotonic)
+                        is_increasing = len(valid_samples) < 2 or valid_samples[1] > valid_samples[0]
+                        if sample_min >= 100 and sample_max <= 2000 and is_increasing:
+                            wl_col = first_col
+                            print(f"  Detected wavelength column: '{first_col}' (first column, range: {sample_min:.1f}-{sample_max:.1f} nm)")
+                except Exception as e:
+                    pass
+        
+        # Strategy 3: Check ALL columns for wavelength-like numeric data
+        if wl_col is None:
+            for col in df.columns:
+                col_str = str(col).strip().upper()
+                # Skip well columns
+                if re.match(r'^[A-H](?:[1-9]|1[0-2])$', col_str):
+                    continue
+                try:
+                    # Check if column has numeric values in wavelength range
+                    sample_vals = pd.to_numeric(df[col].head(10), errors='coerce').values
+                    valid_samples = sample_vals[~np.isnan(sample_vals)]
+                    if len(valid_samples) >= 3:
+                        sample_min, sample_max = float(valid_samples.min()), float(valid_samples.max())
+                        # Check if it's a wavelength-like column
+                        if sample_min >= 100 and sample_max <= 2000:
+                            # Check if values are roughly evenly spaced (wavelengths usually are)
+                            if len(valid_samples) >= 2:
+                                step = valid_samples[1] - valid_samples[0]
+                                if step > 0 and step < 100:  # Reasonable step size
+                                    wl_col = col
+                                    print(f"  Detected wavelength column: '{col}' (range: {sample_min:.1f}-{sample_max:.1f} nm)")
+                                    break
+                except:
+                    pass
+        
+        if wl_col is not None:
+            wl_values = pd.to_numeric(df[wl_col], errors='coerce').values
+            # Remove NaN values but preserve order
+            valid_mask = ~np.isnan(wl_values)
+            if np.any(valid_mask):
+                valid_wl = wl_values[valid_mask]
+                # Ensure wavelengths are in ascending order
+                if len(valid_wl) > 1 and valid_wl[0] > valid_wl[-1]:
+                    valid_wl = valid_wl[::-1]
+                print(f"  Extracted wavelength range: {valid_wl.min():.1f} - {valid_wl.max():.1f} nm ({len(valid_wl)} points)")
+                return valid_wl
+        
+        # Fallback to index-based (shouldn't happen if CSV is properly formatted)
         n = len(df)
+        print(f"  WARNING: No wavelength column found, using index-based (0-{n-1}).")
+        print(f"  Available columns: {list(df.columns)[:10]}...")  # Show first 10 columns
+        # Check if any column has wavelength-like values
+        for col in df.columns[:5]:  # Check first 5 columns
+            try:
+                sample = pd.to_numeric(df[col].head(3), errors='coerce').values
+                valid = sample[~np.isnan(sample)]
+                if len(valid) > 0:
+                    print(f"    Column '{col}': sample values {valid}")
+            except:
+                pass
         return np.arange(n)
 
     def build_wavelengths(self, exemplar_df: pd.DataFrame) -> np.ndarray:
         cfg = self.cfg
+        
+        # FIRST: Try to infer wavelength from CSV column (most accurate)
+        inferred_wl = self.infer_wavelength_vector(exemplar_df)
+        
+        # If we successfully inferred wavelengths from CSV, use them
+        # (unless they seem obviously wrong - e.g., all zeros or starting at 0)
+        if len(inferred_wl) > 0:
+            wl_min, wl_max = float(inferred_wl.min()), float(inferred_wl.max())
+            # Check if inferred wavelengths seem reasonable (not just index-based)
+            if wl_min >= 100 and wl_max <= 2000:  # Reasonable wavelength range
+                data_length = len(exemplar_df)
+                # Ensure length matches
+                if len(inferred_wl) == data_length:
+                    return inferred_wl
+                elif len(inferred_wl) > data_length:
+                    # Trim to match data length
+                    return inferred_wl[:data_length]
+                else:
+                    # Extend if needed (shouldn't happen, but handle it)
+                    step = inferred_wl[1] - inferred_wl[0] if len(inferred_wl) > 1 else 1
+                    extension = np.arange(inferred_wl[-1] + step, 
+                                         inferred_wl[-1] + step * (data_length - len(inferred_wl) + 1),
+                                         step)
+                    return np.concatenate([inferred_wl, extension[:data_length - len(inferred_wl)]])
+        
+        # FALLBACK: Use config wavelength range if specified
         data_length = len(exemplar_df)
         if cfg.start_wavelength is not None and cfg.end_wavelength is not None and cfg.wavelength_step_size is not None:
             # Build wavelength array from range, but trim to match actual data length
@@ -1818,9 +2104,11 @@ class CurveFitting:
                                      cfg.wavelength_step_size)
                 x = np.concatenate([x, extension[:data_length - len(x)]])
             return x
-        return self.infer_wavelength_vector(exemplar_df)
+        
+        # LAST RESORT: Index-based (shouldn't happen with proper CSV)
+        return np.arange(data_length)
 
-    def stack_blocks(self, blocks: Dict[int, pd.DataFrame]) -> Tuple[np.ndarray, np.ndarray, List[str], List[int]]:
+    def stack_blocks(self, blocks: Dict[int, pd.DataFrame]) -> Tuple[np.ndarray, np.ndarray, List[str], List[int], Dict[int, np.ndarray]]:
         # Filter out non-well columns (like "Wavelength", "WAVELENGTH", etc.)
         def is_well_column(col: str) -> bool:
             col_upper = str(col).strip().upper()
@@ -1852,8 +2140,17 @@ class CurveFitting:
         
         num_wells = len(common_wells)
         
-        # Build wavelength array from the longest read (most complete data)
-        # This ensures we have the full wavelength range
+        # Build wavelength arrays PER READ (each read may have different wavelength ranges)
+        # Store them in a dict keyed by read number
+        read_wavelengths = {}
+        for r in read_indices:
+            read_df = blocks[r]
+            read_wl = self.build_wavelengths(read_df)
+            read_wavelengths[r] = read_wl
+            print(f"  Read {r} wavelength range: {read_wl.min():.1f}-{read_wl.max():.1f} nm ({len(read_wl)} points)")
+        
+        # Use the longest read's wavelength array as the "master" for tensor dimensions
+        # But we'll use per-read wavelengths when extracting data
         longest_read_idx = read_lengths.index(max_wavelengths)
         exemplar = blocks[read_indices[longest_read_idx]]
         x = self.build_wavelengths(exemplar)
@@ -1909,7 +2206,7 @@ class CurveFitting:
         if len(x) != max_wavelengths:
             raise ValueError(f"Wavelength array length ({len(x)}) does not match tensor wavelength dimension ({max_wavelengths})")
         
-        return tensor, x, common_wells, read_indices
+        return tensor, x, common_wells, read_indices, read_wavelengths
 
     def curate_dataset(self) -> Dict[str, object]:
         if not self.cfg.data_csv or not self.cfg.composition_csv:
@@ -1921,14 +2218,15 @@ class CurveFitting:
         if not sel_blocks:
             raise ValueError("No reads selected; check read_selection.")
         sel_blocks = self.drop_wells(sel_blocks, self.cfg.wells_to_ignore)
-        tensor, wavelengths, wells, reads = self.stack_blocks(sel_blocks)
+        tensor, wavelengths, wells, reads, read_wavelengths = self.stack_blocks(sel_blocks)
 
         comp_aligned = composition.copy()
         comp_aligned = comp_aligned.loc[:, [w for w in wells if w in comp_aligned.columns]]
 
         return {
             "tensor": tensor,
-            "wavelengths": wavelengths,
+            "wavelengths": wavelengths,  # Master wavelength array (for compatibility)
+            "read_wavelengths": read_wavelengths,  # Per-read wavelength arrays
             "wells": wells,
             "reads": reads,
             "composition": comp_aligned,
@@ -1947,8 +2245,74 @@ class CurveFitting:
             raise KeyError(f"Read {read} not in curated reads: {reads}")
         w_idx = wells.index(well)
         r_idx = reads.index(read)
-        x = curated["wavelengths"].copy()  # type: ignore
+        
+        # Use per-read wavelength array if available, otherwise fall back to master
+        read_wavelengths = curated.get("read_wavelengths", {})  # type: ignore
+        if read_wavelengths and read in read_wavelengths:
+            # Use this read's specific wavelength array
+            x = read_wavelengths[read].copy()
+            print(f"  Using read-specific wavelength array for read {read}: {x.min():.1f}-{x.max():.1f} nm")
+        else:
+            # Fall back to master wavelength array (for backward compatibility)
+            x = curated["wavelengths"].copy()  # type: ignore
+        
         y = curated["tensor"][r_idx, :, w_idx].copy()  # type: ignore
+        
+        # Ensure x and y have compatible lengths (y may be padded to max_wavelengths)
+        # Trim x to match y's actual data length
+        if len(x) > len(y):
+            x = x[:len(y)]
+        elif len(x) < len(y):
+            # Extend x if needed (shouldn't happen, but handle it)
+            step = x[1] - x[0] if len(x) > 1 else 1
+            num_extra = len(y) - len(x)
+            extension = np.arange(x[-1] + step, x[-1] + step * (num_extra + 1), step)
+            x = np.concatenate([x, extension[:num_extra]])
+        
+        # Remove any padded zeros or NaNs at the beginning and end of the data 
+        # (This happens when reads have different lengths or starting points)
+        # Strategy: Find where valid data starts by looking for NaN/invalid values
+        
+        # Identify invalid values based on fill_na_value
+        if np.isnan(self.cfg.fill_na_value):
+            # NaN fill value: invalid = NaN
+            invalid_mask = np.isnan(y)
+        else:
+            # Numeric fill value: invalid = NaN or equal to fill_na_value
+            fill_val = self.cfg.fill_na_value
+            invalid_mask = np.isnan(y) | (y == fill_val)
+            # Also check for values very close to fill_na_value (within small tolerance)
+            if not np.isnan(fill_val) and fill_val != 0:
+                tolerance = max(abs(fill_val) * 0.001, 1e-10)
+                invalid_mask |= (np.abs(y - fill_val) < tolerance)
+        
+        # Find first and last valid indices
+        valid_mask = ~invalid_mask
+        if np.any(valid_mask):
+            valid_indices = np.where(valid_mask)[0]
+            first_valid = valid_indices[0]
+            last_valid = valid_indices[-1]
+            
+            # Trim both x and y to only include valid data points
+            # This ensures wavelength array matches actual data range
+            x_trimmed = x[first_valid : last_valid + 1]
+            y_trimmed = y[first_valid : last_valid + 1]
+            
+            # Verify the trim makes sense (wavelengths should be monotonic)
+            if len(x_trimmed) > 1:
+                x_diff = np.diff(x_trimmed)
+                if np.any(x_diff <= 0):
+                    print(f"  Warning: Wavelength array not monotonic after trimming for {well} read {read}")
+            
+            print(f"  Trimmed data for {well} read {read}: removed {first_valid} leading and {len(y)-last_valid-1} trailing invalid points. "
+                  f"Wavelength range: {x_trimmed.min():.1f}-{x_trimmed.max():.1f} nm ({len(x_trimmed)} points)")
+            
+            x = x_trimmed
+            y = y_trimmed
+        else:
+            # No valid data found - this will be caught by validation below
+            print(f"  Warning: No valid data found for {well} read {read} (all values are invalid)")
+            pass
         
         # Apply wavelength filtering if specified
         cfg = self.cfg
@@ -1961,8 +2325,22 @@ class CurveFitting:
             mask &= (x <= cfg.end_wavelength)
         
         # Apply mask
-        x = x[mask]
-        y = y[mask]
+        x_filtered = x[mask]
+        y_filtered = y[mask]
+        
+        # Check if filtering removed all data
+        if len(x_filtered) == 0 and len(x) > 0:
+            x_min, x_max = float(x.min()), float(x.max())
+            raise ValueError(
+                f"Wavelength filtering removed all data points for well {well}, read {read}!\n"
+                f"  Data wavelength range: {x_min:.1f} - {x_max:.1f} nm\n"
+                f"  Filter range: {cfg.start_wavelength if cfg.start_wavelength else 'none'} - "
+                f"{cfg.end_wavelength if cfg.end_wavelength else 'none'} nm\n"
+                f"  Solution: Disable wavelength filtering or adjust the range to match your data."
+            )
+        
+        x = x_filtered
+        y = y_filtered
         
         # Apply step size filtering if specified
         if cfg.wavelength_step_size is not None and cfg.wavelength_step_size > 1:
@@ -1970,6 +2348,22 @@ class CurveFitting:
             step_indices = np.arange(0, len(x), cfg.wavelength_step_size)
             x = x[step_indices]
             y = y[step_indices]
+        
+        # Final validation: ensure we have data
+        if len(x) == 0 or len(y) == 0:
+            raise ValueError(
+                f"No valid data points found for well {well}, read {read}. "
+                f"This may be due to:\n"
+                f"  - Wavelength filtering removing all points (start={cfg.start_wavelength}, end={cfg.end_wavelength})\n"
+                f"  - All data points being NaN or invalid\n"
+                f"  - Data trimming removing all points"
+            )
+        
+        if len(x) != len(y):
+            raise ValueError(
+                f"Wavelength and intensity arrays have different lengths for well {well}, read {read}: "
+                f"x has {len(x)} points, y has {len(y)} points"
+            )
         
         return x, y
 
