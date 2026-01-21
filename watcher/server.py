@@ -24,11 +24,6 @@ from watchdog.observers import Observer
 
 from tools.memory import MemoryManager
 from agents.router import AgentRouter
-from agents.hypothesis_agent import HypothesisAgent
-from agents.experiment_agent import ExperimentAgent
-from agents.curve_fitting_agent import CurveFittingAgent
-from agents.watcher_agent import WatcherAgent
-from agents.fallback_agent import FallbackAgent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -74,6 +69,13 @@ class Watcher(FileSystemEventHandler):
         Construct a router instance.  In this headless context we only need
         minimal agent objects – they can ignore Streamlit UI.
         """
+        # Lazy imports to avoid Streamlit-only code at server startup
+        from agents.hypothesis_agent import HypothesisAgent
+        from agents.experiment_agent import ExperimentAgent
+        from agents.curve_fitting_agent import CurveFittingAgent
+        from agents.watcher_agent import WatcherAgent
+        from agents.fallback_agent import FallbackAgent
+
         # Dummy descriptions; router only needs names + confidence/run_agent
         hyp = HypothesisAgent(name="Hypothesis Agent", desc="Background", question="")
         exp = ExperimentAgent(name="Experiment Agent", desc="Background", params_const={})
@@ -213,6 +215,12 @@ def _route_event_task(payload: Dict[str, Any]):
         router = watcher_handler._build_router() if watcher_handler else None
         if not router:
             # Create a temporary router if watcher not initialized
+            from agents.hypothesis_agent import HypothesisAgent
+            from agents.experiment_agent import ExperimentAgent
+            from agents.curve_fitting_agent import CurveFittingAgent
+            from agents.watcher_agent import WatcherAgent
+            from agents.fallback_agent import FallbackAgent
+
             hyp = HypothesisAgent(name="Hypothesis Agent", desc="Background", question="")
             exp = ExperimentAgent(name="Experiment Agent", desc="Background", params_const={})
             cf = CurveFittingAgent(name="Curve Fitting", desc="Background")
