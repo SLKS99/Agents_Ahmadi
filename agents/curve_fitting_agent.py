@@ -17,15 +17,24 @@ import numpy as np
 
 
 def _sort_wells(wells: List[str]) -> List[str]:
-    """Sort wells in standard plate order: A1, A2, ..., A12, B1, B2, ..., H12"""
+    """Sort wells in standard plate order: A1, A2, ..., A12, B1, B2, ..., H12
+    Also handles R1, R2, etc. format for acquisitions"""
     def well_key(well: str) -> tuple:
         """Extract (row_letter, column_number) for sorting"""
+        # Handle A1-H12 format
         match = re.match(r'^([A-H])(\d+)$', well.upper())
         if match:
             row_letter = match.group(1)
             col_num = int(match.group(2))
-            return (row_letter, col_num)
-        return (well, 0)  # Fallback for invalid format
+            return (0, row_letter, col_num)  # 0 = well plate format
+        
+        # Handle R1, R2, etc. format
+        r_match = re.match(r'^R(\d+)$', well.upper())
+        if r_match:
+            r_num = int(r_match.group(1))
+            return (1, 'R', r_num)  # 1 = R format
+        
+        return (2, well, 0)  # Fallback for other formats
     
     return sorted(wells, key=well_key)
 
@@ -246,6 +255,32 @@ class CurveFittingAgent(BaseAgent):
                 actual_reads_to_analyze = reads_to_analyze
 
             available_wells = curated["wells"]
+            
+            # Debug: Check what wells were found
+            st.info(f"🔍 Debug: Found {len(available_wells)} wells in curated dataset: {available_wells[:10]}{'...' if len(available_wells) > 10 else ''}")
+            
+            if not available_wells:
+                st.error(f"❌ No wells found in curated dataset! Available reads: {curated.get('reads', [])}")
+                st.error("This usually means the CSV format isn't being parsed correctly.")
+                st.error("Please check that your Excel file has the correct format:")
+                st.error("- Column 0: Wavelength values")
+                st.error("- Columns 1+: Each column is a read/acquisition")
+                st.error("\nDebug info:")
+                st.error(f"- Total reads found: {len(curated.get('reads', []))}")
+                # Try to get more debug info
+                try:
+                    from tools.fitting_agent import CurveFitting
+                    agent = CurveFitting(config)
+                    raw_data, composition = agent.load_csvs(config.data_csv, config.composition_csv)
+                    all_blocks = agent.parse_all_reads(raw_data)
+                    if all_blocks:
+                        first_read = list(all_blocks.keys())[0]
+                        first_block = all_blocks[first_read]
+                        st.error(f"- First read ({first_read}) columns: {list(first_block.columns)}")
+                        st.error(f"- First read shape: {first_block.shape}")
+                except Exception as e:
+                    st.error(f"- Could not get debug info: {e}")
+                st.stop()
 
             # Filter wells (exclusion takes precedence over inclusion)
             if wells_to_ignore:
@@ -256,10 +291,11 @@ class CurveFittingAgent(BaseAgent):
                 wells_to_process = available_wells
 
             # Sort wells in standard plate order (A1, A2, ..., A12, B1, B2, ..., H12)
+            # For R1, R2 format, sort by number
             wells_to_process = _sort_wells(wells_to_process)
 
             if not wells_to_process:
-                raise ValueError("No valid wells found to analyze")
+                raise ValueError(f"No valid wells found to analyze. Available wells: {available_wells}")
 
             st.info(f"Starting analysis of {len(wells_to_process)} wells: {wells_to_process}")
 
@@ -310,12 +346,20 @@ class CurveFittingAgent(BaseAgent):
 
             # Save consolidated results
             if all_results:
+                # Get base name from data file for naming exports
+                data_file_name = os.path.basename(data_csv_path)
+                # Remove extension and clean up the name
+                base_name = os.path.splitext(data_file_name)[0]
+                # Remove any problematic characters for filenames
+                base_name = re.sub(r'[<>:"/\\|?*]', '_', base_name)
+                base_name = base_name.strip()
+                
                 # Save comprehensive JSON results
-                json_filename = "results/all_wells_analysis.json"
+                json_filename = f"results/{base_name}_peak_fit_results.json"
                 json_file = save_all_wells_results(all_results, json_filename)
 
                 # Export to CSV
-                csv_filename = "results/peak_data_export.csv"
+                csv_filename = f"results/{base_name}_peak_fit_export.csv"
                 csv_file = export_peak_data_to_csv(all_results, csv_filename)
 
                 return {

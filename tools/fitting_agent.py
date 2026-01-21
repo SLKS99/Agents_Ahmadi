@@ -1891,7 +1891,23 @@ class CurveFitting:
     def load_csvs(data_path: str, comp_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         if not (data_path.lower().endswith(".csv") and comp_path.lower().endswith(".csv")):
             raise ValueError("Both data_path and comp_path must be .csv files")
-        data = pd.read_csv(data_path, header=None)
+        # Use Python engine for more lenient parsing of CSV files with inconsistent column counts
+        # (e.g., files with empty lines between Read blocks)
+        # Don't skip bad lines - we need all lines for proper parsing
+        try:
+            # Try reading with Python engine, but don't skip lines
+            data = pd.read_csv(data_path, header=None, engine='python', sep=',', skipinitialspace=True)
+        except Exception as e:
+            # If that fails, try with on_bad_lines='skip' as fallback
+            try:
+                data = pd.read_csv(data_path, header=None, engine='python', on_bad_lines='skip')
+            except TypeError:
+                # Fallback for older pandas versions that don't have on_bad_lines
+                try:
+                    data = pd.read_csv(data_path, header=None, engine='python', error_bad_lines=False, warn_bad_lines=False)
+                except TypeError:
+                    # Fallback for even older pandas versions
+                    data = pd.read_csv(data_path, header=None, engine='python')
         data = data.replace("OVRFLW", np.nan)
         composition = pd.read_csv(comp_path, index_col=0)
         return data, composition
@@ -1928,9 +1944,45 @@ class CurveFitting:
             block = block.drop(columns=[0])
         
         if len(block) > 0:
-            new_header = block.iloc[0]
-            block = block.iloc[1:]
-            block.columns = new_header
+            # Use first row as header, but check if it looks like a header row
+            # Headers should contain text like "Wavelength" or well names like "R1", "A1", etc.
+            first_row = block.iloc[0]
+            first_row_str = [str(c).strip().upper() for c in first_row]
+            
+            # Check if first row looks like a header (contains "WAVELENGTH" or well name patterns)
+            is_header = False
+            for val in first_row_str:
+                if 'WAVELENGTH' in val or 'WL' in val or re.match(r'^R\d+$', val) or re.match(r'^[A-H](?:[1-9]|1[0-2])$', val):
+                    is_header = True
+                    break
+            
+            if is_header:
+                new_header = block.iloc[0]
+                block = block.iloc[1:]
+                # Convert header to strings to ensure column names are strings (not numeric)
+                block.columns = [str(c).strip() for c in new_header]
+            else:
+                # First row doesn't look like a header - check if it's actually numeric data
+                first_row_vals = [pd.to_numeric(str(c), errors='coerce') for c in block.iloc[0]]
+                is_numeric_data = sum(1 for v in first_row_vals if pd.notna(v)) >= 2
+                
+                if is_numeric_data:
+                    # First row is data, not header - need to add header
+                    # Check if we have at least 2 columns (wavelength + at least one well)
+                    if len(block.columns) >= 2:
+                        # Assume: col 0 = Wavelength, col 1+ = wells
+                        # Use R1, R2, etc. format for wells (matching our CSV generation)
+                        well_cols = [f'R{i}' for i in range(1, len(block.columns))]
+                        block.columns = ['Wavelength'] + well_cols
+                    else:
+                        # Fallback: use generic names (but make them recognizable as wells)
+                        block.columns = ['Wavelength'] + [f'R{i}' for i in range(1, len(block.columns))] if len(block.columns) > 1 else ['Wavelength']
+                else:
+                    # First row might be header but didn't match our pattern - use it anyway
+                    new_header = block.iloc[0]
+                    block = block.iloc[1:]
+                    block.columns = [str(c).strip() for c in new_header]
+            
             block = block.apply(pd.to_numeric, errors="coerce")
         return block
 
@@ -2115,12 +2167,22 @@ class CurveFitting:
             # Exclude wavelength-related columns
             if col_upper in ['WAVELENGTH', 'WAVELENGTH (NM)', 'WAVELENGTH_NM', 'WL']:
                 return False
-            # Only include valid well names (A1-H12 pattern)
-            return bool(re.match(r'^[A-H](?:[1-9]|1[0-2])$', col_upper))
+            # Include valid well names (A1-H12 pattern) OR acquisition names (R1, R2, etc.)
+            if re.match(r'^[A-H](?:[1-9]|1[0-2])$', col_upper):
+                return True
+            # Also accept R-prefixed names for acquisitions (R1, R2, R3, etc.)
+            if re.match(r'^R\d+$', col_upper):
+                return True
+            return False
 
         well_sets = []
-        for df in blocks.values():
+        for read_num, df in blocks.items():
+            # Debug: Print what columns we have
+            print(f"  Read {read_num} columns: {list(df.columns)}")
+            print(f"  Read {read_num} column types: {[type(c).__name__ for c in df.columns]}")
+            print(f"  Read {read_num} shape: {df.shape}")
             well_cols = [str(c) for c in df.columns if is_well_column(str(c))]
+            print(f"  Read {read_num} well columns found: {well_cols}")
             well_sets.append(set(well_cols))
 
         common_wells = sorted(set.intersection(*well_sets)) if well_sets else []
@@ -2236,8 +2298,14 @@ class CurveFitting:
     def get_xy(self, curated: Dict[str, object], well: str, read: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
         well = str(well).strip().upper()
         wells: List[str] = curated["wells"]  # type: ignore
-        if well not in wells:
+        # Case-insensitive matching for well names
+        well_upper = well.upper()
+        wells_upper = [w.upper() for w in wells]
+        if well_upper not in wells_upper:
             raise KeyError(f"Well '{well}' not in curated set: {wells}")
+        # Get the actual well name (preserving original case)
+        well_idx = wells_upper.index(well_upper)
+        well = wells[well_idx]
         reads: List[int] = curated["reads"]  # type: ignore
         if read is None:
             read = reads[0]

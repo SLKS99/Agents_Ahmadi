@@ -1,6 +1,7 @@
 import os
 import tempfile
 import json
+import re
 from io import BytesIO
 
 import pandas as pd
@@ -49,6 +50,131 @@ def parse_reads_spec(spec: str, default_max: int) -> list:
 import re
 
 READ_HEADER_PATTERN = re.compile(r"^Read\s+(\d+):EM\s+Spectrum\s*$", re.I)
+
+def convert_excel_to_spectroscopy_csv(file_bytes: bytes, filename: str, start_row: int = 4, read_start_col: int = 1) -> bytes:
+    """
+    Convert Excel file with wavelength in column 0 and reads in columns 1+ 
+    to the CSV format expected by the fitting agent.
+    
+    Args:
+        file_bytes: Excel file bytes
+        filename: Original filename
+        start_row: Row where data starts (0-indexed, default 4)
+        read_start_col: Column index where read/acquisition data starts (default 1, column 0 is wavelength)
+    
+    Returns:
+        CSV file bytes in the format expected by the fitting agent
+    """
+    try:
+        # Read Excel file
+        df = pd.read_excel(BytesIO(file_bytes), sheet_name=0, header=None)
+        
+        # Find where actual numeric data starts by checking for numeric values in column 0
+        # Skip header rows (like "Wavelength [nm]", "Timestamp", etc.)
+        data_start_row = start_row
+        for i in range(min(10, len(df))):  # Check first 10 rows
+            try:
+                val = df.iloc[i, 0]
+                if pd.notna(val):
+                    numeric_val = pd.to_numeric(val, errors='coerce')
+                    if pd.notna(numeric_val) and numeric_val > 100:  # Wavelengths are typically > 100nm
+                        data_start_row = i
+                        break
+            except:
+                continue
+        
+        # Extract wavelength column (column 0, starting from data_start_row)
+        wavelength = df.iloc[data_start_row:, 0].copy()
+        
+        # Extract read columns (columns from read_start_col onward)
+        read_data = df.iloc[data_start_row:, read_start_col:].copy()
+        
+        # Convert to numeric
+        wavelength = pd.to_numeric(wavelength, errors='coerce')
+        read_data = read_data.apply(pd.to_numeric, errors='coerce')
+        
+        # Remove rows with NaN wavelength
+        valid_mask = ~wavelength.isna()
+        wavelength = wavelength[valid_mask]
+        read_data = read_data[valid_mask]
+        
+        # Use all available data rows (no artificial limit)
+        # Note: User's plotting code uses 1:400, but we'll process all available data
+        # If needed, users can filter by wavelength range in the UI
+        
+        # Create CSV format expected by fitting agent
+        # Format: Read 1:EM Spectrum header, then wavelength and well columns
+        # The fitting agent's _slice_block drops column 0, so we need:
+        # - Column 0: "Read N:EM Spectrum" (will be in first col, then dropped)
+        # - Empty line
+        # - Column 0: "Wavelength" (will be dropped), Column 1: Well name (R1, R2, etc.)
+        # - Data rows: wavelength in col 0 (dropped), intensity in col 1
+        csv_lines = []
+        
+        # For each read column, create a "Read N:EM Spectrum" block
+        num_reads = read_data.shape[1]
+        
+        for read_num in range(1, num_reads + 1):
+            # Add read header - use consistent 3-column format
+            # Column 0: Read header, Columns 1-2: empty (will be dropped)
+            csv_lines.append(f"Read {read_num}:EM Spectrum,,")
+            
+            # Empty line after header - use 3 columns to match format
+            csv_lines.append(",,,")
+            
+            # Create data block with wavelength and this read's data
+            read_col = read_data.iloc[:, read_num - 1]
+            
+            # Create well names - use R1, R2, etc. format (now accepted by fitting agent)
+            # YES, we're keeping BOTH formats:
+            # - A1-H12 format for regular well plates (still fully supported)
+            # - R1-R2 format for acquisitions/reads (newly added support)
+            well_name = f"R{read_num}"
+            
+            # Build the data block header
+            # Format: Column 0 = placeholder (dropped), Column 1 = Wavelength, Column 2 = Well name
+            # After _slice_block drops col 0: Column 0 = Wavelength, Column 1 = Well name
+            csv_lines.append(f"Placeholder,Wavelength,{well_name}")
+            
+            # Add data rows - all with 3 columns for consistency
+            for idx in range(len(wavelength)):
+                wl_val = wavelength.iloc[idx]
+                intensity_val = read_col.iloc[idx]
+                if pd.notna(wl_val) and pd.notna(intensity_val):
+                    csv_lines.append(f"P,{wl_val},{intensity_val}")
+            
+            # Add empty line between reads - use 3 columns to match
+            csv_lines.append(",,,")
+        
+        # Convert to bytes
+        csv_content = "\n".join(csv_lines)
+        return csv_content.encode('utf-8')
+        
+    except Exception as e:
+        raise ValueError(f"Error converting Excel file: {e}")
+
+def create_dummy_composition_csv(well_names: list) -> str:
+    """
+    Create a dummy composition CSV file for Excel-based analysis.
+    Since Excel files don't have composition data, we create a placeholder.
+    
+    Args:
+        well_names: List of well/acquisition names (e.g., ['R1', 'R2', ...])
+    
+    Returns:
+        CSV content as string (UTF-8)
+    """
+    # Create a simple composition CSV with a dummy material
+    csv_lines = []
+    
+    # Header row: Material name followed by all well/acquisition names
+    csv_lines.append("Material," + ",".join(well_names))
+    
+    # Data row: Dummy material with all values set to 1.0
+    csv_lines.append("Sample," + ",".join(["1.0"] * len(well_names)))
+    
+    csv_content = "\n".join(csv_lines)
+    return csv_content
 
 def parse_spectroscopy_csv(file_bytes: bytes, filename: str):
     """
@@ -306,14 +432,15 @@ col1, col2 = st.columns(2)
 
 with col1:
     data_file = st.file_uploader(
-        "Upload Spectral Data CSV",
-        type=["csv"],
-        help="Upload the spectral data CSV file with multiple reads and wells",
+        "Upload Spectral Data (CSV or Excel)",
+        type=["csv", "xlsx", "xls"],
+        help="Upload the spectral data CSV or Excel file with multiple reads and wells",
         key="cf_data_uploader"
     )
     if data_file:
         st.session_state.cf_data_file = data_file
-        st.success(f"✅ Data file uploaded: {data_file.name}")
+        file_type = "Excel" if data_file.name.lower().endswith(('.xlsx', '.xls')) else "CSV"
+        st.success(f"✅ Data file uploaded: {data_file.name} ({file_type})")
 
 with col2:
     composition_file = st.file_uploader(
@@ -538,8 +665,8 @@ with col2:
         st.rerun()
 
 if run_button:
-    if not st.session_state.cf_data_file or not st.session_state.cf_composition_file:
-        st.error("❌ Please upload both spectral data CSV and composition CSV files before running analysis.")
+    if not st.session_state.cf_data_file:
+        st.error("❌ Please upload a spectral data file (CSV or Excel) before running analysis.")
         st.stop()
 
     if not st.session_state.get('api_key'):
@@ -549,18 +676,100 @@ if run_button:
     # Get files from session state
     data_file = st.session_state.cf_data_file
     composition_file = st.session_state.cf_composition_file
+    
+    # Check if data file is Excel
+    is_excel = data_file.name.lower().endswith(('.xlsx', '.xls'))
 
     # Save uploaded files temporarily
     with tempfile.TemporaryDirectory() as temp_dir:
         data_path = os.path.join(temp_dir, "data.csv")
         comp_path = os.path.join(temp_dir, "composition.csv")
 
-        # Save uploaded files
-        with open(data_path, "wb") as f:
-            f.write(data_file.getvalue())
+        # Convert Excel to CSV format if needed
+        if is_excel:
+            try:
+                st.info("📊 Converting Excel file to CSV format...")
+                csv_bytes = convert_excel_to_spectroscopy_csv(
+                    data_file.getvalue(), 
+                    data_file.name,
+                    start_row=4,  # Data starts at row 4 (0-indexed)
+                    read_start_col=1  # Reads start at column 1 (column 0 is wavelength)
+                )
+                # Write as text file with UTF-8 encoding
+                with open(data_path, "w", encoding='utf-8') as f:
+                    f.write(csv_bytes.decode('utf-8'))
+                st.success("✅ Excel file converted successfully!")
+            except Exception as e:
+                st.error(f"❌ Error converting Excel file: {str(e)}")
+                import traceback
+                st.exception(e)
+                st.stop()
+        else:
+            # Save CSV file as-is (handle encoding)
+            try:
+                # Try to read and write as UTF-8
+                csv_content = data_file.getvalue()
+                if isinstance(csv_content, bytes):
+                    # Try to decode as UTF-8, fallback to latin-1 if needed
+                    try:
+                        csv_content = csv_content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        csv_content = csv_content.decode('latin-1')
+                with open(data_path, "w", encoding='utf-8') as f:
+                    f.write(csv_content)
+            except Exception as e:
+                # Fallback to binary write
+                with open(data_path, "wb") as f:
+                    f.write(data_file.getvalue() if isinstance(data_file.getvalue(), bytes) else data_file.getvalue().encode('utf-8'))
 
-        with open(comp_path, "wb") as f:
-            f.write(composition_file.getvalue())
+        # Handle composition file
+        if composition_file:
+            try:
+                comp_content = composition_file.getvalue()
+                if isinstance(comp_content, bytes):
+                    try:
+                        comp_content = comp_content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        comp_content = comp_content.decode('latin-1')
+                with open(comp_path, "w", encoding='utf-8') as f:
+                    f.write(comp_content)
+            except Exception as e:
+                # Fallback to binary write
+                with open(comp_path, "wb") as f:
+                    f.write(composition_file.getvalue())
+        else:
+            # Create dummy composition CSV for Excel files
+            if is_excel:
+                st.warning("⚠️ No composition file provided. Creating dummy composition file for Excel data.")
+                try:
+                    # Read the converted CSV to get well names
+                    with open(data_path, 'r', encoding='utf-8') as f:
+                        csv_content = f.read()
+                    
+                    # Find all well names (R1, R2, etc.) from the CSV
+                    well_pattern = re.compile(r'R\d+')
+                    well_names = list(set(well_pattern.findall(csv_content)))
+                    well_names.sort(key=lambda x: int(x[1:]))  # Sort by number
+                    
+                    if not well_names:
+                        # Fallback: create wells based on number of reads detected
+                        # Count "Read N:" headers
+                        read_pattern = re.compile(r'Read\s+(\d+):')
+                        read_numbers = [int(m.group(1)) for m in read_pattern.findall(csv_content)]
+                        well_names = [f"R{n}" for n in sorted(read_numbers)]
+                    
+                    dummy_csv_content = create_dummy_composition_csv(well_names)
+                    with open(comp_path, "w", encoding='utf-8') as f:
+                        f.write(dummy_csv_content)
+                    st.info(f"✅ Created dummy composition file with {len(well_names)} acquisitions/reads: {well_names[:10]}{'...' if len(well_names) > 10 else ''}")
+                except Exception as e:
+                    st.error(f"❌ Error creating composition file: {str(e)}")
+                    import traceback
+                    st.exception(e)
+                    st.stop()
+            else:
+                st.error("❌ Please upload a composition CSV file before running analysis.")
+                st.stop()
 
         # Determine wells to analyze based on visual selection
         # If no wells selected, default to all wells (passing None to the agent)
@@ -570,19 +779,19 @@ if run_button:
         read_type_filter = "em_spectrum" if "PL" in read_type else "absorbance"
 
         # Quick validation: Analyze read types to ensure selection is valid
-        with tempfile.TemporaryDirectory() as debug_temp_dir:
-            debug_data_path = os.path.join(debug_temp_dir, "debug_data.csv")
-            with open(debug_data_path, "wb") as f:
-                f.write(data_file.getvalue())
-
-            # Quick analysis of read headers
-            debug_data = pd.read_csv(debug_data_path, header=None)
-            first_col = debug_data.iloc[:, 0].astype(str)
+        # Use the already converted CSV file for validation
+        # Read as text first to avoid pandas parsing issues with empty lines
+        try:
+            with open(data_path, 'r', encoding='utf-8') as f:
+                csv_lines = f.readlines()
+            
+            # Find read headers by scanning lines
             read_pattern = re.compile(r"^Read\s+(\d+):(.*)$", re.I)
-
             read_analysis = {"em_spectrum": [], "absorbance": [], "unknown": []}
-            for idx, val in first_col.items():
-                m = read_pattern.match(val)
+            
+            for line in csv_lines:
+                line = line.strip()
+                m = read_pattern.match(line)
                 if m:
                     read_num = int(m.group(1))
                     read_desc = m.group(2).strip().lower()
@@ -593,6 +802,29 @@ if run_button:
                         read_analysis["absorbance"].append(read_num)
                     else:
                         read_analysis["unknown"].append(read_num)
+        except Exception as e:
+            # Fallback: try reading with pandas, but handle errors gracefully
+            try:
+                debug_data = pd.read_csv(data_path, header=None, encoding='utf-8', on_bad_lines='skip', engine='python')
+                first_col = debug_data.iloc[:, 0].astype(str)
+                read_pattern = re.compile(r"^Read\s+(\d+):(.*)$", re.I)
+
+                read_analysis = {"em_spectrum": [], "absorbance": [], "unknown": []}
+                for idx, val in first_col.items():
+                    m = read_pattern.match(str(val))
+                    if m:
+                        read_num = int(m.group(1))
+                        read_desc = m.group(2).strip().lower()
+
+                        if "em spectrum" in read_desc or "emission" in read_desc or "fluorescence" in read_desc:
+                            read_analysis["em_spectrum"].append(read_num)
+                        elif "absorbance" in read_desc or "absorption" in read_desc:
+                            read_analysis["absorbance"].append(read_num)
+                        else:
+                            read_analysis["unknown"].append(read_num)
+            except Exception as e2:
+                st.warning(f"Could not parse CSV for validation: {e2}. Proceeding with analysis...")
+                read_analysis = {"em_spectrum": [1], "absorbance": [], "unknown": []}  # Default assumption
 
         # Check if the requested read type exists
         if read_type_filter == "absorbance" and not read_analysis["absorbance"]:
@@ -709,6 +941,13 @@ if run_button:
 
                 if 'files' in result:
                     col1, col2 = st.columns(2)
+                    
+                    # Get base name from uploaded file for download filenames
+                    data_file_name = data_file.name if data_file else "unknown_file"
+                    base_name = os.path.splitext(data_file_name)[0]
+                    # Remove any problematic characters for filenames
+                    base_name = re.sub(r'[<>:"/\\|?*]', '_', base_name)
+                    base_name = base_name.strip()
 
                     # JSON results
                     if 'json_results' in result['files']:
@@ -719,7 +958,7 @@ if run_button:
                             col1.download_button(
                                 "📄 Download JSON Results",
                                 json_data,
-                                f"curve_fitting_results_{int(time.time())}.json",
+                                f"{base_name}_peak_fit_results.json",
                                 "application/json",
                                 use_container_width=True,
                                 key=f"download_json_{int(time.time())}"
@@ -734,7 +973,7 @@ if run_button:
                             col2.download_button(
                                 "📊 Download CSV Export",
                                 csv_data,
-                                f"peak_data_export_{int(time.time())}.csv",
+                                f"{base_name}_peak_fit_export.csv",
                                 "text/csv",
                                 use_container_width=True,
                                 key=f"download_csv_{int(time.time())}"
@@ -754,15 +993,21 @@ with st.expander("How to Use the Curve Fitting Agent", expanded=False):
     st.markdown("""
     ### Data Format Requirements
 
-    **Spectral Data CSV:**
-    - Must contain "Read N:EM Spectrum" headers for each read block
-    - Well columns should be named A1, B2, C3, etc. (A-H, 1-12)
-    - Wavelength/intensity data in rows for each well
+    **Spectral Data (CSV or Excel):**
+    - **CSV Format**: Must contain "Read N:EM Spectrum" headers for each read block
+      - Well columns should be named A1, B2, C3, etc. (A-H, 1-12)
+      - Wavelength/intensity data in rows for each well
+    - **Excel Format**: 
+      - Wavelength data in column 0 (first column), starting at row 4 (0-indexed)
+      - Read data in columns 5+ (starting from column index 5)
+      - Each column from column 5 onward represents a different read
+      - The agent will automatically convert Excel files to the required CSV format
 
-    **Composition CSV:**
+    **Composition CSV (Optional for Excel files):**
     - First column should be material names (index)
     - Subsequent columns should be well names matching the data CSV
     - Values represent material concentrations/compositions
+    - **Note**: For Excel files, if no composition file is provided, a dummy composition file will be created automatically
 
     ### Analysis Workflow
 
