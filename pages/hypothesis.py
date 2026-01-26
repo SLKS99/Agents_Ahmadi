@@ -132,3 +132,13 @@ agent = HypothesisAgent(
 
 # Run the agent - it will handle all the UI and state management
 agent.run_agent(memory)
+
+# Workflow transition: move to Experiment after hypothesis analysis
+if (
+    st.session_state.get("workflow_active")
+    and st.session_state.get("stage") == "analysis"
+    and st.session_state.get("hypothesis_ready")
+):
+    st.session_state.workflow_step = "experiment"
+    st.session_state.workflow_experiment_started = False
+    st.switch_page("pages/experiment.py")

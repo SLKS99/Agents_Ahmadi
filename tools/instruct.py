@@ -462,7 +462,7 @@ EXPERIMENTAL_PLAN_TOT_INSTRUCTIONS = """ You are an experimental design expert c
 {user_question}
 
 ## Probing Questions
-{probing_questions}
+{probing_questions} 
 
 ## Experimental Constraints
 {experimental_constraints}

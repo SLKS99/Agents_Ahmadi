@@ -11,6 +11,23 @@ st.title("Experiment Agent")
 # Optional manual trigger for the Experiment Agent
 st.markdown("Use the controls below to configure experimental constraints or trigger the agent directly.")
 
+def _run_experiment_agent() -> None:
+    # Increment usage metrics
+    st.session_state.agent_usage_counts["experiment"] = (
+        st.session_state.agent_usage_counts.get("experiment", 0) + 1
+    )
+
+    # Snapshot current session state for history/analytics
+    memory.snapshot_session_state("before_experiment_agent_run")
+
+    # Instantiate and run the experiment agent using current constraints
+    agent = ExperimentAgent(
+        name="Experiment Agent",
+        desc="Generates experimental plans and automation artifacts from the current hypothesis and constraints.",
+        params_const=st.session_state.experimental_constraints,
+    )
+    agent.run_agent(memory)
+
 # Manual Input Section for LLM Generation Components
 with st.expander("Manual Input (Optional - Use if no hypothesis available)", expanded=False):
     st.markdown("**Provide the following components manually to generate experimental plans without a hypothesis:**")
@@ -291,18 +308,26 @@ st.markdown("""
 
 # Run Experiment Agent button
 if st.button("Run Experiment Agent", type="primary", use_container_width=True):
-    # Increment usage metrics
-    st.session_state.agent_usage_counts["experiment"] = (
-        st.session_state.agent_usage_counts.get("experiment", 0) + 1
-    )
+    _run_experiment_agent()
 
-    # Snapshot current session state for history/analytics
-    memory.snapshot_session_state("before_experiment_agent_run")
+# Workflow auto-run: execute experiment once when routed here
+if (
+    st.session_state.get("workflow_active")
+    and st.session_state.get("workflow_step") == "experiment"
+    and not st.session_state.get("workflow_experiment_started")
+):
+    st.session_state.workflow_experiment_started = True
+    _run_experiment_agent()
 
-    # Instantiate and run the experiment agent using current constraints
-    agent = ExperimentAgent(
-        name="Experiment Agent",
-        desc="Generates experimental plans and automation artifacts from the current hypothesis and constraints.",
-        params_const=st.session_state.experimental_constraints,
+# Workflow transition: move to Curve Fitting after outputs exist
+if (
+    st.session_state.get("workflow_active")
+    and st.session_state.get("experimental_outputs")
+    and not st.session_state.get("workflow_experiment_completed")
+):
+    st.session_state.workflow_experiment_outputs = (
+        st.session_state.experimental_outputs
     )
-    agent.run_agent(memory)
+    st.session_state.workflow_experiment_completed = True
+    st.session_state.workflow_step = "curve_fitting"
+    st.switch_page("pages/curve_fitting.py")

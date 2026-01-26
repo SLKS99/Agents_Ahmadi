@@ -66,7 +66,8 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
 """
         try:
             choice_raw = socratic.generate_text_with_llm(prompt).strip()
-        except Exception:
+        except Exception as e:
+            st.warning(f"Unable to generate agent name from LLM. Try again. Error: {e}")
             return None
 
         # Normalise and try to map back to a known agent

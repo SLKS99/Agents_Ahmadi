@@ -58,7 +58,13 @@ class MemoryManager:
             "experimental_outputs": None,
             "stop_hypothesis": False,
             "hypothesis_round_count": 0,
-            "max_hypothesis_rounds": 5
+            "max_hypothesis_rounds": 5,
+            "workflow_active": False,
+            "workflow_step": "idle",
+            "workflow_completed": False,
+            "workflow_experiment_started": False,
+            "workflow_experiment_completed": False,
+            "workflow_experiment_outputs": None
         }
 
         for key, value in defaults.items():

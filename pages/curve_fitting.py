@@ -32,6 +32,27 @@ if st.button("Clear Cache and Restart Program"):
     st.cache_data.clear()
     st.rerun()
 
+workflow_outputs = st.session_state.get("workflow_experiment_outputs")
+if workflow_outputs:
+    with st.expander("Workflow Context (Experiment Outputs)", expanded=False):
+        plan = workflow_outputs.get("plan") or ""
+        worklist = workflow_outputs.get("worklist") or ""
+        layout = workflow_outputs.get("layout") or ""
+        protocol = workflow_outputs.get("protocol") or ""
+
+        if plan:
+            st.markdown("**Experimental Plan**")
+            st.text_area("Plan", plan, height=120, disabled=True)
+        if worklist:
+            st.markdown("**Worklist (CSV)**")
+            st.code(worklist, language="csv")
+        if layout:
+            st.markdown("**Plate Layout**")
+            st.code(layout, language="text")
+        if protocol:
+            st.markdown("**Opentrons Protocol**")
+            st.code(protocol, language="python")
+
 def parse_reads_spec(spec: str, default_max: int) -> list:
     """Parse reads specification string into list of integers"""
     spec = spec.strip().lower()
