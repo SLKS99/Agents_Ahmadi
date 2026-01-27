@@ -64,7 +64,11 @@ except ModuleNotFoundError:
 # ---------- LLM client with multiple providers ----------
 
 try:
-    import google.generativeai as genai  # type: ignore
+    import warnings
+    # Suppress deprecation warning for now (package still works)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        import google.generativeai as genai  # type: ignore
 except ImportError:
     genai = None
 
@@ -2258,6 +2262,13 @@ def fit_peaks_lmfit_with_retry(
     if not _HAS_LMFIT:
         raise RuntimeError("lmfit is required. pip install lmfit")
 
+    # Ensure x and y have the same length
+    if len(x) != len(y):
+        min_len = min(len(x), len(y))
+        x = x[:min_len]
+        y = y[:min_len]
+        print(f"Warning: x and y had different lengths, trimmed to {min_len} points")
+
     rng = np.random.default_rng()
     xmin, xmax = float(np.min(x)), float(np.max(x))
     span = xmax - xmin
@@ -2283,6 +2294,23 @@ def fit_peaks_lmfit_with_retry(
             continue
 
         yhat = result.best_fit
+        
+        # Ensure yhat has the same length as y
+        # This can happen if NaNs were omitted during fitting
+        if len(yhat) != len(y):
+            # Re-evaluate the model on the full x array to get predictions for all points
+            try:
+                yhat = result.eval(x=x)
+            except Exception:
+                # If re-evaluation fails, pad or trim to match y
+                if len(yhat) < len(y):
+                    # Pad with last value or NaN
+                    padding = np.full(len(y) - len(yhat), yhat[-1] if len(yhat) > 0 else 0.0)
+                    yhat = np.concatenate([yhat, padding])
+                else:
+                    # Trim to match y length
+                    yhat = yhat[:len(y)]
+        
         r2, rmse = _score_fit(y, yhat)
         stats = PeakFitStats(
             r2=r2,

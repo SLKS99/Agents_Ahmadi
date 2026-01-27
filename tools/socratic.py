@@ -20,10 +20,20 @@ else:
     logging.warning("No API key found in environment on module import. Will check again at runtime.")
 
 def _lazy_import_genai():
-    """Lazy import of google.generativeai to speed up module loading"""
+    """
+    Lazy import of google.generativeai to speed up module loading.
+    
+    Note: google.generativeai is deprecated in favor of google.genai.
+    This code still works but will need migration in the future.
+    See: https://github.com/google-gemini/deprecated-generative-ai-python
+    """
     global _genai
     if _genai is None:
-        import google.generativeai as genai
+        import warnings
+        # Suppress deprecation warning for now (package still works)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            import google.generativeai as genai  # type: ignore
         _genai = genai
     return _genai
 

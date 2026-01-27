@@ -21,7 +21,9 @@ class ExperimentAgent(BaseAgent):
         self.memory = MemoryManager()
 
     def confidence(self, params) -> float:
-        pass
+        """Return confidence score for experiment tasks."""
+        # Low confidence by default (experiment agent usually needs user input)
+        return 0.3
 
     def parse_worklist_from_plan(self, experimental_plan, materials):
         """Parse specific worklist details from experimental plan"""
@@ -705,5 +707,38 @@ class ExperimentAgent(BaseAgent):
             "plate_format": plate_format,
             "materials": materials
         }, "experiment")
+        
+        # Record experiment in memory system
+        try:
+            from tools.experiment_memory import get_experiment_memory
+            experiment_memory = get_experiment_memory()
+            
+            # Generate experiment ID from worklist
+            import hashlib
+            worklist_hash = hashlib.md5(worklist.encode()).hexdigest()[:8]
+            experiment_id = f"exp_{worklist_hash}"
+            
+            # Extract composition information from worklist if available
+            composition = {}
+            if materials:
+                composition = {mat: 0 for mat in materials}  # Placeholder - could parse from worklist
+            
+            # Check if experiment already exists
+            if experiment_memory.has_experiment(experiment_id):
+                st.info(f"ℹ️ Experiment {experiment_id} already exists in memory.")
+            else:
+                experiment_memory.add_experiment(
+                    experiment_id=experiment_id,
+                    description=f"Experimental plan: {experimental_plan[:200]}...",
+                    composition=composition,
+                    metadata={
+                        "plate_format": plate_format,
+                        "materials": materials,
+                        "plan_length": len(experimental_plan),
+                    }
+                )
+                st.success(f"✅ Experiment {experiment_id} recorded in memory!")
+        except Exception as e:
+            st.warning(f"Could not record experiment in memory: {e}")
 
         st.success("✅ Experimental planning complete!")

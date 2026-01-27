@@ -1,9 +1,18 @@
 
 from typing import Any, Dict, List, Optional
-
-import streamlit as st
+import logging
 
 from tools import socratic
+
+logger = logging.getLogger(__name__)
+
+# Lazy import streamlit to avoid issues in headless mode
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except (ImportError, RuntimeError):
+    STREAMLIT_AVAILABLE = False
+    st = None
 
 
 class AgentRouter:
@@ -37,10 +46,23 @@ class AgentRouter:
         """
         agent_names = [getattr(a, "name", "Unnamed Agent") for a in self.agents]
 
-        uploaded_files = st.session_state.get("uploaded_files", [])
-        last_hypothesis = st.session_state.get("last_hypothesis")
-        experimental_outputs = st.session_state.get("experimental_outputs")
-        experimental_constraints = st.session_state.get("experimental_constraints", {})
+        # Get context from session state if available
+        uploaded_files = []
+        last_hypothesis = None
+        experimental_outputs = None
+        experimental_constraints = {}
+        curve_fitting_results = None
+        
+        if STREAMLIT_AVAILABLE and st is not None:
+            try:
+                uploaded_files = st.session_state.get("uploaded_files", [])
+                last_hypothesis = st.session_state.get("last_hypothesis")
+                experimental_outputs = st.session_state.get("experimental_outputs")
+                experimental_constraints = st.session_state.get("experimental_constraints", {})
+                curve_fitting_results = st.session_state.get("curve_fitting_results")
+            except (RuntimeError, AttributeError, NameError):
+                # Fallback to defaults if session state access fails
+                pass
 
         context = {
             "payload": payload,
@@ -48,6 +70,7 @@ class AgentRouter:
             "last_hypothesis": last_hypothesis,
             "experimental_outputs": experimental_outputs,
             "experimental_constraints": experimental_constraints,
+            "curve_fitting_results": curve_fitting_results is not None,
         }
 
         prompt = f"""
@@ -67,7 +90,15 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
         try:
             choice_raw = socratic.generate_text_with_llm(prompt).strip()
         except Exception as e:
-            st.warning(f"Unable to generate agent name from LLM. Try again. Error: {e}")
+            logger.warning(f"Unable to generate agent name from LLM: {e}")
+            # Only show Streamlit warning if we're actually in a Streamlit context
+            # Don't try to import st again - use the module-level one if available
+            try:
+                if STREAMLIT_AVAILABLE and st is not None and hasattr(st, 'warning'):
+                    st.warning(f"Unable to generate agent name from LLM. Try again. Error: {e}")
+            except (RuntimeError, AttributeError, NameError):
+                # st might not be available in headless mode
+                pass
             return None
 
         # Normalise and try to map back to a known agent
@@ -82,11 +113,20 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
         Manual workflow: follow `st.session_state.manual_workflow` and
         `st.session_state.workflow_index`.
         """
-        workflow = st.session_state.get(
-            "manual_workflow",
-            ["Hypothesis Agent", "Experiment Agent", "Curve Fitting"],
-        )
-        index = st.session_state.get("workflow_index", 0)
+        if not STREAMLIT_AVAILABLE:
+            # In headless mode, use default workflow
+            workflow = ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "Analysis Agent"]
+            index = 0
+        else:
+            try:
+                workflow = st.session_state.get(
+                    "manual_workflow",
+                    ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "Analysis Agent"],
+                )
+                index = st.session_state.get("workflow_index", 0)
+            except (RuntimeError, AttributeError):
+                workflow = ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "Analysis Agent"]
+                index = 0
 
         if not workflow or index >= len(workflow):
             return None
@@ -102,7 +142,25 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
           decision using the current session context.
         - In manual mode, follow the user-configured workflow order.
         """
-        routing_mode = st.session_state.get("routing_mode", "Autonomous (LLM)")
+        # Store payload in memory so agents can access it
+        try:
+            if hasattr(memory, 'log_event'):
+                memory.log_event(
+                    "router",
+                    {"current_payload": payload},
+                    mode="router"
+                )
+        except Exception:
+            pass
+        
+        if STREAMLIT_AVAILABLE:
+            try:
+                routing_mode = st.session_state.get("routing_mode", "Autonomous (LLM)")
+            except (RuntimeError, AttributeError):
+                routing_mode = "Autonomous (LLM)"
+        else:
+            # In headless mode, use autonomous routing
+            routing_mode = "Autonomous (LLM)"
 
         # Manual workflow mode – ignore confidence and LLM, follow user order.
         if routing_mode == "Manual":
@@ -113,42 +171,91 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
                 raise RuntimeError("Manual workflow is empty or exhausted.")
 
             # Advance workflow index for next call
-            st.session_state.workflow_index = st.session_state.get("workflow_index", 0) + 1
-            st.session_state.agent_usage_counts["router"] += 1
-            st.session_state.agent_usage_counts[getattr(agent, "name", "unknown").split()[0].lower()] = \
-                st.session_state.agent_usage_counts.get(
-                    getattr(agent, "name", "unknown").split()[0].lower(), 0
-                ) + 1
+            try:
+                if STREAMLIT_AVAILABLE and hasattr(st, 'session_state'):
+                    st.session_state.workflow_index = st.session_state.get("workflow_index", 0) + 1
+                    st.session_state.agent_usage_counts["router"] = st.session_state.agent_usage_counts.get("router", 0) + 1
+                    agent_key = getattr(agent, "name", "unknown").split()[0].lower()
+                    st.session_state.agent_usage_counts[agent_key] = (
+                        st.session_state.agent_usage_counts.get(agent_key, 0) + 1
+                    )
+            except (RuntimeError, AttributeError):
+                pass
             return agent.run_agent(memory)
 
         # Autonomous mode: start with confidence-based scoring
-        scored = [
-            (agent.confidence(payload), agent)
-            for agent in self.agents
-        ]
+        scored = []
+        for agent in self.agents:
+            try:
+                conf = agent.confidence(payload)
+                # Ensure confidence is a float (handle None)
+                if conf is None:
+                    conf = 0.0
+                conf = float(conf)
+                scored.append((conf, agent))
+            except Exception as e:
+                # If confidence method fails, assign low confidence
+                logger.warning(f"Agent {getattr(agent, 'name', 'unknown')} confidence failed: {e}")
+                scored.append((0.0, agent))
+        
+        if not scored:
+            if self.fallback_agent:
+                return self.fallback_agent.run_agent(memory)
+            raise RuntimeError("No agents available.")
+        
         scored.sort(reverse=True, key=lambda x: x[0])
 
         score, top_agent = scored[0]
 
         # If all agents are uncertain, fall back
-        if score < 0.4:
+        if score is None or score < 0.4:
             if self.fallback_agent:
-                st.session_state.agent_usage_counts["router"] += 1
+                try:
+                    if STREAMLIT_AVAILABLE and hasattr(st, 'session_state'):
+                        st.session_state.agent_usage_counts["router"] = st.session_state.agent_usage_counts.get("router", 0) + 1
+                except (RuntimeError, AttributeError):
+                    pass
                 return self.fallback_agent.run_agent(memory)
             raise RuntimeError("No agent is confident enough.")
 
         # Let the LLM override / confirm the top choice using global context
-        llm_agent = self._llm_select_agent(payload)
+        # Skip LLM selection in headless mode (watcher server) to avoid API key dependency
+        llm_agent = None
+        # Only use LLM if Streamlit is available AND we have an API key
+        if STREAMLIT_AVAILABLE:
+            try:
+                import os
+                api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+                if api_key:
+                    llm_agent = self._llm_select_agent(payload)
+                else:
+                    logger.debug("Skipping LLM agent selection - no API key in environment")
+            except Exception as e:
+                logger.warning(f"LLM agent selection failed: {e}")
+        
         chosen_agent = llm_agent or top_agent
 
         try:
-            st.session_state.agent_usage_counts["router"] += 1
-            key = getattr(chosen_agent, "name", "unknown").split()[0].lower()
-            st.session_state.agent_usage_counts[key] = (
-                st.session_state.agent_usage_counts.get(key, 0) + 1
-            )
-            return chosen_agent.run_agent(memory)
-        except Exception:
+            # Update usage counts if Streamlit is available
+            try:
+                if STREAMLIT_AVAILABLE and hasattr(st, 'session_state'):
+                    st.session_state.agent_usage_counts["router"] = st.session_state.agent_usage_counts.get("router", 0) + 1
+                    key = getattr(chosen_agent, "name", "unknown").split()[0].lower()
+                    st.session_state.agent_usage_counts[key] = (
+                        st.session_state.agent_usage_counts.get(key, 0) + 1
+                    )
+            except (RuntimeError, AttributeError):
+                pass
+            
+            # Pass payload to run_agent if it accepts it
+            import inspect
+            sig = inspect.signature(chosen_agent.run_agent)
+            if 'payload' in sig.parameters:
+                return chosen_agent.run_agent(memory, payload=payload)
+            else:
+                return chosen_agent.run_agent(memory)
+        except Exception as e:
+            logger.error(f"Error running agent {getattr(chosen_agent, 'name', 'unknown')}: {e}")
             if self.fallback_agent:
                 return self.fallback_agent.run_agent(memory)
             raise

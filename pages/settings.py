@@ -136,8 +136,137 @@ with general:
             st.success("Workflow progress reset. The next routed call will start at Step 1.")
 
 with experiment:
-    # Changing Jupyter Sever Configuration
-    st.markdown("##### Jupyter Server Configuration")
+    # Experiment Configuration
+    st.markdown("##### Experiment Configuration")
+    
+    col_exp1, col_exp2 = st.columns(2)
+    
+    with col_exp1:
+        st.markdown("**Jupyter Server Configuration**")
+        jupyter_url = st.text_input(
+            "Jupyter Server URL:",
+            value=st.session_state.jupyter_config["server_url"],
+            help="Base URL only (e.g., http://10.140.141.160:48888/) - do NOT include /tree/ path",
+            key="jupyter_url_input"
+        )
+        st.session_state.jupyter_config["server_url"] = jupyter_url
+        
+        jupyter_token = st.text_input(
+            "Jupyter Token:",
+            value=st.session_state.jupyter_config.get("token", ""),
+            type="password",
+            help="Authentication token for Jupyter server",
+            key="jupyter_token_input"
+        )
+        st.session_state.jupyter_config["token"] = jupyter_token
+        
+        jupyter_notebook_path = st.text_input(
+            "Notebook Path/Directory:",
+            value=st.session_state.jupyter_config.get("notebook_path", "Automated Agent"),
+            help="Directory path in Jupyter where files will be uploaded (e.g., 'Automated Agent' or 'research_notes')",
+            key="jupyter_notebook_path_input"
+        )
+        st.session_state.jupyter_config["notebook_path"] = jupyter_notebook_path
+        
+        jupyter_upload_enabled = st.checkbox(
+            "Enable Auto-Upload to Jupyter",
+            value=st.session_state.jupyter_config.get("upload_enabled", False),
+            help="Automatically upload generated experiment files to Jupyter server",
+            key="jupyter_upload_enabled_input"
+        )
+        st.session_state.jupyter_config["upload_enabled"] = jupyter_upload_enabled
+    
+    with col_exp2:
+        st.markdown("**Experiment Memory**")
+        experiment_memory_file = st.text_input(
+            "Experiment Memory File:",
+            value=st.session_state.get("experiment_memory_file", "experiment_memory.json"),
+            help="File to store completed experiment records",
+            key="exp_memory_file_input"
+        )
+        st.session_state.experiment_memory_file = experiment_memory_file
+        
+        experiment_data_dir = st.text_input(
+            "Experiment Data Directory:",
+            value=st.session_state.get("experiment_data_dir", "data"),
+            help="Directory where experiment data and memory files are stored",
+            key="exp_data_dir_input"
+        )
+        st.session_state.experiment_data_dir = experiment_data_dir
+    
+    st.divider()
+    
+    # Watcher Configuration
+    st.markdown("##### Watcher Configuration")
+    st.markdown("Configure the file system watcher that automatically triggers curve fitting when files are uploaded.")
+    
+    col_wat1, col_wat2 = st.columns(2)
+    
+    with col_wat1:
+        watcher_directory = st.text_input(
+            "Watcher Directory:",
+            value=st.session_state.get("watcher_directory", r"C:\Users\shery\OneDrive - University of Tennessee\Data Experiment files"),
+            help="Full path to directory that the watcher should monitor for file changes (e.g., C:\\Users\\shery\\OneDrive - University of Tennessee\\Data Experiment files). Do not include quotes.",
+            key="watcher_dir_input"
+        )
+        # Strip quotes if user accidentally added them
+        watcher_directory = watcher_directory.strip().strip('"').strip("'")
+        st.session_state.watcher_directory = watcher_directory
+        
+        # Show if directory exists
+        watch_path = Path(watcher_directory).expanduser()
+        if watch_path.exists() and watch_path.is_dir():
+            st.success(f"✅ Directory exists and is accessible")
+            # Show file count
+            try:
+                file_count = len(list(watch_path.glob("*")))
+                st.caption(f"Contains {file_count} items")
+            except:
+                pass
+        else:
+            st.warning(f"⚠️ Directory does not exist or is not accessible")
+            st.info("💡 **Tips:**")
+            st.info("1. Make sure the path is correct (no quotes needed)")
+            st.info("2. Check that you have read/write permissions")
+            st.info("3. For OneDrive folders, ensure they are synced locally")
+        
+        watcher_results_dir = st.text_input(
+            "Results Directory:",
+            value=st.session_state.get("watcher_results_dir", "results"),
+            help="Directory where curve fitting results are saved",
+            key="watcher_results_dir_input"
+        )
+        st.session_state.watcher_results_dir = watcher_results_dir
+    
+    with col_wat2:
+        watcher_enabled = st.checkbox(
+            "Enable Watcher",
+            value=st.session_state.get("watcher_enabled", False),
+            help="Enable automatic file system watching for workflow automation",
+            key="watcher_enabled_input"
+        )
+        st.session_state.watcher_enabled = watcher_enabled
+        
+        if watcher_enabled:
+            watcher_port = st.number_input(
+                "Watcher Server Port:",
+                min_value=1000,
+                max_value=9999,
+                value=st.session_state.get("watcher_port", 8000),
+                help="Port for the watcher HTTP server",
+                key="watcher_port_input"
+            )
+            st.session_state.watcher_port = watcher_port
+            
+            st.info("💡 **Next Steps:**")
+            st.info("1. Go to **Watcher Control** page to start the server")
+            st.info("2. Click '🚀 Start Server' to start the watcher")
+            st.info("3. Click '▶️ Start Watching' to begin monitoring")
+    
+    st.divider()
+    
+    # Legacy Jupyter Configuration (kept for backward compatibility)
+    st.markdown("##### Jupyter Server Configuration (Legacy Form)")
 
     with st.form("jupyter_server_config"):
         col_jup1, col_jup2 = st.columns(2)
@@ -184,219 +313,58 @@ with experiment:
         st.success("Jupyter Server Configuration loaded successfully!")
 
 with watcher:
-    st.markdown("##### Watcher Agent Configuration")
+    st.markdown("##### Watcher Configuration")
     
-    st.markdown("""
-    The Watcher Agent monitors filesystem events and automatically triggers the next agent in your workflow.
-    It watches for files matching the pattern `output_from_*.json` and routes them to the appropriate agent.
+    st.info("""
+    **📝 Note:** Watcher configuration has been moved to the **Experiment** tab for better organization.
+    
+    **🔧 To control the watcher server:**
+    - Go to **Watcher Control** page in the navigation menu
+    - Or use the configuration in the **Experiment** tab above
     """)
     
-    # Server Configuration
-    st.markdown("**Server Configuration**")
-    watcher_config_col1, watcher_config_col2 = st.columns(2)
+    st.markdown("---")
     
-    with watcher_config_col1:
-        watcher_server_url = st.text_input(
-            "Watcher Server URL:",
-            value=st.session_state.get("watcher_server_url", "http://localhost:8000"),
-            help="URL of the FastAPI watcher server (default: http://localhost:8000)",
-            key="watcher_server_url_input"
-        )
-        if st.button("Save Watcher URL", use_container_width=True):
-            st.session_state.watcher_server_url = watcher_server_url
-            st.success("Watcher server URL saved!")
+    st.markdown("**Current Watcher Settings:**")
     
-    with watcher_config_col2:
-        watch_directory = st.text_input(
-            "Watch Directory:",
-            value=st.session_state.get("watcher_watch_dir", str(Path.cwd())),
-            help="Directory to watch for filesystem events (default: current working directory)",
-            key="watcher_watch_dir_input"
-        )
-        if st.button("Save Watch Directory", use_container_width=True):
-            st.session_state.watcher_watch_dir = watch_directory
-            st.success("Watch directory saved!")
+    col_info1, col_info2 = st.columns(2)
+    
+    with col_info1:
+        st.markdown(f"""
+        **Directory:** `{st.session_state.get("watcher_directory", "Not set")}`  
+        **Results Dir:** `{st.session_state.get("watcher_results_dir", "results")}`  
+        **Port:** `{st.session_state.get("watcher_port", 8000)}`
+        """)
+    
+    with col_info2:
+        watcher_enabled_status = "✅ Enabled" if st.session_state.get("watcher_enabled", False) else "❌ Disabled"
+        st.markdown(f"**Status:** {watcher_enabled_status}")
+        
+        # Quick link to watcher control
+        if st.button("🔍 Go to Watcher Control", use_container_width=True, type="primary"):
+            st.switch_page("pages/watcher_control.py")
     
     st.markdown("---")
     
-    # Server Control
-    st.markdown("**Server Control**")
-    
-    # Check server status
-    server_url = st.session_state.get("watcher_server_url", "http://localhost:8000")
-    server_running = False
-    server_info = {}
-    
-    try:
-        import requests
-        response = requests.get(f"{server_url}/health", timeout=2)
-        if response.status_code == 200:
-            server_info = response.json()
-            server_running = server_info.get("observer_running", False)
-    except Exception:
-        server_running = False
-    
-    status_col1, status_col2, status_col3 = st.columns(3)
-    
-    with status_col1:
-        if server_running:
-            st.success("✅ **Server Running**")
-            if server_info.get("watch_dir"):
-                st.caption(f"Watching: {server_info.get('watch_dir')}")
-        else:
-            st.error("❌ **Server Not Running**")
-            st.caption("Start the server to begin watching")
-    
-    with status_col2:
-        if not server_running:
-            if st.button("▶️ Start Watcher Server", use_container_width=True, type="primary"):
-                try:
-                    # Get the project root directory
-                    project_root = Path(__file__).parent.parent
-                    server_script = project_root / "watcher" / "server.py"
-                    
-                    if not server_script.exists():
-                        st.error(f"Watcher server script not found at: {server_script}")
-                    else:
-                        # Start server in background
-                        # Use subprocess to start the server
-                        env = os.environ.copy()
-                        if st.session_state.get("watcher_watch_dir"):
-                            env["WATCH_DIR"] = st.session_state.watcher_watch_dir
-                        if st.session_state.get("watcher_server_url"):
-                            # Extract port from URL
-                            try:
-                                from urllib.parse import urlparse
-                                parsed = urlparse(st.session_state.watcher_server_url)
-                                if parsed.port:
-                                    env["WATCHER_PORT"] = str(parsed.port)
-                            except:
-                                pass
-                        
-                        # Start the server process
-                        process = subprocess.Popen(
-                            [sys.executable, str(server_script)],
-                            cwd=str(project_root),
-                            env=env,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            start_new_session=True
-                        )
-                        
-                        # Store process info
-                        st.session_state.watcher_server_pid = process.pid
-                        st.session_state.watcher_server_process = process
-                        
-                        st.success("🚀 Watcher server starting...")
-                        st.info("💡 The server is running in the background. Check status above to confirm it's running.")
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Failed to start server: {str(e)}")
-                    st.info("💡 You can also start it manually: `python watcher/server.py`")
-        else:
-            if st.button("⏹️ Stop Watcher Server", use_container_width=True, type="secondary"):
-                try:
-                    import requests
-                    response = requests.post(f"{server_url}/watch/stop", timeout=5)
-                    if response.status_code == 200:
-                        st.success("✅ Server stopped successfully!")
-                        if "watcher_server_pid" in st.session_state:
-                            del st.session_state.watcher_server_pid
-                        if "watcher_server_process" in st.session_state:
-                            del st.session_state.watcher_server_process
-                        st.rerun()
-                    else:
-                        st.warning("⚠️ Server stop request sent, but response was unexpected")
-                except Exception as e:
-                    st.error(f"❌ Failed to stop server: {str(e)}")
-                    st.info("💡 You may need to stop it manually or restart the Streamlit app")
-    
-    with status_col3:
-        if st.button("🔄 Refresh Status", use_container_width=True):
-            st.rerun()
-    
-    st.markdown("---")
-    
-    # Manual Trigger
-    st.markdown("**Manual Watcher Trigger**")
-    st.markdown("Manually trigger the watcher agent to process a file event:")
-    
-    col_trigger1, col_trigger2 = st.columns(2)
-    
-    with col_trigger1:
-        trigger_file_path = st.text_input(
-            "File Path:",
-            value="output_from_hypothesis.json",
-            help="Path to the file that should trigger the watcher",
-            key="trigger_file_path"
-        )
-    
-    with col_trigger2:
-        if st.button("🚀 Trigger Watcher", use_container_width=True, type="primary"):
-            if not server_running:
-                st.warning("⚠️ Server is not running. Please start the server first.")
-            else:
-                try:
-                    import requests
-                    server_url = st.session_state.get("watcher_server_url", "http://localhost:8000")
-                    
-                    # Create file event request
-                    event_data = {
-                        "file_path": trigger_file_path,
-                        "event_type": "created",
-                        "metadata": {
-                            "triggered_by": "user",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    }
-                    
-                    response = requests.post(
-                        f"{server_url}/file-event",
-                        json=event_data,
-                        timeout=10
-                    )
-                    
-                    if response.status_code == 200:
-                        st.success("✅ Watcher agent triggered successfully!")
-                        result = response.json()
-                        with st.expander("View Response", expanded=False):
-                            st.json(result)
-                    else:
-                        st.error(f"❌ Error: {response.status_code} - {response.text}")
-                except Exception as e:
-                    st.error(f"❌ Failed to trigger watcher: {str(e)}")
-    
-    st.markdown("---")
-    
-    # Instructions
-    with st.expander("📖 Manual Start Instructions", expanded=False):
+    # Quick reference
+    with st.expander("📖 Quick Reference", expanded=False):
         st.markdown("""
-        **To start the watcher server manually:**
+        **Watcher Configuration Locations:**
         
-        1. Open a terminal/command prompt
-        2. Navigate to the project directory
-        3. Run one of the following commands:
+        1. **Settings → Experiment Tab**: Configure watcher directory, port, and enable/disable
+        2. **Watcher Control Page**: Start/stop server, view logs, scan directory
         
-        ```bash
-        # Using Python directly
-        python watcher/server.py
+        **What the Watcher Does:**
+        - Monitors a directory for CSV/Excel files
+        - Automatically triggers curve fitting when files are detected
+        - Runs in the background as a separate server process
         
-        # Using uvicorn
-        uvicorn watcher.server:app --host 0.0.0.0 --port 8000
-        
-        # With custom port
-        WATCHER_PORT=8001 python watcher/server.py
-        
-        # With custom watch directory
-        WATCH_DIR=/path/to/watch python watcher/server.py
-        ```
-        
-        **Server Endpoints:**
-        - `GET /health` - Check server status
-        - `POST /watch/start?watch_directory=/path` - Start watching a directory
-        - `POST /watch/stop` - Stop watching
-        - `POST /file-event` - Manually trigger a file event
-        - `POST /route` - Route a payload directly
+        **Quick Start:**
+        1. Set your API key in Settings → General
+        2. Configure watcher directory in Settings → Experiment
+        3. Go to Watcher Control page
+        4. Click "🚀 Start Server"
+        5. Click "▶️ Start Watching"
         """)
 
 with cache:

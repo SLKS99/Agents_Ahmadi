@@ -23,7 +23,9 @@ class HypothesisAgent(BaseAgent):
         # Don't import socratic here - lazy load when needed
 
     def confidence(self, payload: Dict[str, Any]) -> float:
-        pass
+        """Return confidence score for hypothesis tasks."""
+        # Low confidence by default (hypothesis agent usually needs user input)
+        return 0.3
 
     def initial_process(self, question, experimental_mode=False, experimental_constraints=None):
         try:

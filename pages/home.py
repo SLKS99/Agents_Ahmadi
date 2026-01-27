@@ -1,8 +1,37 @@
 import streamlit as st
+import json
+import time
+from pathlib import Path
 from tools.memory import MemoryManager
 
 memory = MemoryManager()
 memory.init_session()
+
+# Check for auto-triggered file from watcher and navigate to curve fitting
+trigger_info_file = Path(__file__).parent.parent / "watcher_trigger_info.json"
+if trigger_info_file.exists():
+    try:
+        with open(trigger_info_file, 'r') as f:
+            trigger_info = json.load(f)
+        
+        trigger_time = trigger_info.get("trigger_time", 0)
+        time_since_trigger = time.time() - trigger_time
+        
+        # Auto-navigate if triggered within last 5 minutes (300 seconds)
+        # This gives more time for curve fitting to complete
+        if time_since_trigger < 300:
+            triggered_file = trigger_info.get("triggered_file", "")
+            st.session_state.watcher_auto_triggered_file = triggered_file
+            st.session_state.watcher_auto_trigger_time = trigger_time
+            
+            # Show a brief message before navigating
+            st.info(f"🔄 **Auto-triggered curve fitting detected!** Navigating to results...")
+            time.sleep(0.5)  # Brief pause for user to see the message
+            
+            # Navigate to curve fitting page
+            st.switch_page("pages/curve_fitting.py")
+    except Exception:
+        pass
 
 st.set_page_config(layout="centered")
 st.title("Multi-Agent AI Framework")
@@ -25,6 +54,8 @@ st.markdown("""
 - **Hypothesis**: Interactive hypothesis generation and refinement
 - **Experiment**: Experimental planning and protocol generation
 - **Curve Fitting**: Data analysis and curve fitting
+- **ML Models**: Gaussian Process models for prediction and exploration
+- **Analysis**: Analyze results in relation to hypothesis and experiments
 - **Settings**: Configuration for API keys, workflows, and agent parameters
 - **History**: Complete interaction history with per-agent tabs and export options
 - **Export Data**: Download your interactions and results for documentation and sharing
@@ -75,6 +106,34 @@ The Curve Fitting Agent analyzes experimental data:
 - Configurable wavelength ranges and read numbers
 - Support for multiple wells and time-resolved measurements
 - Export of fitting results and visualizations
+
+#### ML Models (Gaussian Process)
+The ML Models page provides machine learning capabilities for experimental optimization:
+- **Gaussian Process regression** to predict properties from composition and curve fitting features
+- **Uncertainty quantification** to assess prediction confidence
+- **Exploration recommendations** using acquisition functions (UCB, EI, PI)
+- **Integration with Analysis Agent** to interpret ML predictions and suggest next experiments
+
+**Features:**
+- Train GP models on curve fitting results and composition data
+- Visualize predictions with uncertainty bounds
+- Generate candidate compositions for exploration
+- Cross-validation for model evaluation
+- Seamless integration with the analysis workflow
+
+#### Analysis Agent
+The Analysis Agent evaluates results and guides next steps:
+- **Relates curve fitting results** to the original hypothesis and experimental plan
+- **Evaluates hypothesis status** (confirmed, needs revision, rejected, or needs more data)
+- **Determines if more experiments are needed** with specific recommendations
+- **Provides literature-backed explanations** of results using established scientific principles
+- **Assesses impact and significance** of findings
+
+**Features:**
+- Comprehensive analysis comparing results to predictions
+- Literature context explaining mechanisms and known examples
+- Actionable recommendations for additional experiments
+- Integration with hypothesis and experiment agents for workflow continuity
 
 #### Router Agent
 The Router Agent intelligently manages workflow transitions:

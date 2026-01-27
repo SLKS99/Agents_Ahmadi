@@ -135,35 +135,230 @@ class CurveFittingAgent(BaseAgent):
 
     def _get_llm_client(self, min_delay_seconds: Optional[float] = None) -> LLMClient:
         """Initialize or return cached LLM client."""
-        # Get delay from provided value or session state or default
-        delay = min_delay_seconds or st.session_state.get('gemini_delay_seconds', 0.5)
+        import os
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Get delay from provided value, session state, or default
+        delay = min_delay_seconds
+        if delay is None:
+            try:
+                import streamlit as st
+                delay = st.session_state.get('gemini_delay_seconds', 0.5)
+            except (ImportError, RuntimeError, AttributeError):
+                delay = 0.5  # Default in headless mode
+        
+        # Get API key from environment or session state
+        api_key = None
+        try:
+            import streamlit as st
+            api_key = st.session_state.get('api_key')
+        except (ImportError, RuntimeError, AttributeError):
+            pass  # Not in Streamlit context
+        
+        # Fallback to environment variables if not in session state
+        if not api_key:
+            api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        
+        if not api_key:
+            raise ValueError("API key not found. Set GEMINI_API_KEY environment variable or configure in Settings.")
         
         # Check if we need to recreate the client (if delay changed or client doesn't exist)
         if self.llm_client is None or (hasattr(self.llm_client, 'min_delay') and self.llm_client.min_delay != delay):
-            if not st.session_state.get('api_key'):
-                raise ValueError("API key not found. Please set your API key in Settings.")
-            
             self.llm_client = LLMClient(
                 provider="gemini",
                 model_id="gemini-2.0-flash-lite",  # Use available model that supports both text and image
-                api_key=st.session_state.api_key,
+                api_key=api_key,
                 min_delay_seconds=delay
             )
         return self.llm_client
 
     def confidence(self, payload: Dict[str, Any]) -> float:
         """Return confidence score for curve fitting tasks."""
-        # Curve fitting is generally applicable to spectral data
-        return 0.8
+        try:
+            # High confidence if auto-triggered from watcher with data file
+            if payload.get("action") == "curve_fitting" and payload.get("auto_trigger"):
+                return 0.95
+            
+            # High confidence if data file is provided
+            if payload.get("data_file") or payload.get("trigger_file"):
+                trigger_file = payload.get("data_file") or payload.get("trigger_file", "")
+                if trigger_file and trigger_file.lower().endswith(('.csv', '.xlsx', '.xls')):
+                    return 0.9
+            
+            # Curve fitting is generally applicable to spectral data
+            return 0.8
+        except Exception:
+            # Fallback confidence if anything goes wrong
+            return 0.5
 
-    def run_agent(self, memory: MemoryManager) -> None:
+    def run_agent(self, memory: MemoryManager, payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Render UI and handle agent interactions.
         
-        Note: The curve fitting UI is primarily handled in the curve_fitting.py page,
-        but this method satisfies the abstract base class requirement.
+        If auto-triggered from watcher with a data file, automatically run curve fitting.
+        Otherwise, the UI is handled in pages/curve_fitting.py
         """
-        # The UI is handled in pages/curve_fitting.py
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Debug logging
+        logger.info(f"CurveFittingAgent.run_agent called with payload: {payload is not None}")
+        if payload:
+            logger.info(f"Payload keys: {list(payload.keys())}")
+            logger.info(f"Payload auto_trigger: {payload.get('auto_trigger')}")
+            logger.info(f"Payload data_file: {payload.get('data_file')}")
+            logger.info(f"Payload trigger_file: {payload.get('trigger_file')}")
+            print(f"[DEBUG] CurveFittingAgent.run_agent - payload received: {payload}")
+        
+        # Check if this is an auto-trigger from watcher
+        auto_trigger = False
+        data_file = None
+        
+        # Try to get payload from parameter or memory
+        if payload:
+            auto_trigger = payload.get("auto_trigger", False)
+            data_file = payload.get("data_file") or payload.get("trigger_file")
+            logger.info(f"Extracted from payload: auto_trigger={auto_trigger}, data_file={data_file}")
+            print(f"[DEBUG] Extracted: auto_trigger={auto_trigger}, data_file={data_file}")
+        else:
+            # Check memory for recent watcher trigger
+            try:
+                events = memory.get_latest_history(limit=5)
+                for event in events:
+                    if isinstance(event, dict) and event.get("type") == "watcher":
+                        event_payload = event.get("payload", {})
+                        if isinstance(event_payload, dict):
+                            trigger_info = event_payload.get("payload", {})
+                            if trigger_info.get("auto_trigger") and trigger_info.get("action") == "curve_fitting":
+                                auto_trigger = True
+                                data_file = trigger_info.get("data_file") or trigger_info.get("trigger_file")
+                                break
+            except Exception:
+                pass
+        
+        # If auto-triggered with a data file, run curve fitting automatically
+        if auto_trigger and data_file:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Auto-triggered curve fitting for: {data_file}")
+            print(f"[INFO] Auto-triggered curve fitting detected for: {data_file}")
+            
+            try:
+                from pathlib import Path
+                data_path = Path(data_file)
+                
+                if not data_path.exists():
+                    logger.error(f"Data file does not exist: {data_path}")
+                    print(f"[ERROR] Data file does not exist: {data_path}")
+                    return
+                
+                # Get inferred parameters from payload if available
+                inferred_params = {}
+                if payload:
+                    inferred_params = payload.get("parameters", {})
+                
+                logger.info(f"Starting automated curve fitting for {data_path.name}")
+                print(f"[INFO] Starting automated curve fitting for {data_path.name}")
+                if inferred_params:
+                    logger.info(f"Using inferred parameters: {inferred_params}")
+                    print(f"[INFO] Using inferred parameters: {inferred_params}")
+                
+                # Try to find a composition file in the same directory
+                comp_file = None
+                data_dir = data_path.parent
+                # List of possible composition file names (searched in order)
+                composition_file_names = [
+                    "composition.csv",
+                    "compositions.csv", 
+                    "comp.csv",
+                    "sample_info.csv",
+                    "sample_composition.csv",
+                    "well_composition.csv",
+                    "composition_data.csv"
+                ]
+                # Look for common composition file names
+                for comp_name in composition_file_names:
+                    comp_path = data_dir / comp_name
+                    if comp_path.exists():
+                        comp_file = str(comp_path)
+                        logger.info(f"Found composition file: {comp_file}")
+                        print(f"[INFO] Found composition file in data directory: {comp_name}")
+                        break
+                
+                # If no composition file found, use default
+                if not comp_file:
+                    default_comp_path = Path(__file__).parent.parent / "data" / "2D-3D.csv"
+                    if default_comp_path.exists():
+                        comp_file = str(default_comp_path)
+                        logger.info(f"Using default composition file: {default_comp_path.name}")
+                        print(f"[INFO] Using default composition file: {default_comp_path.name}")
+                    else:
+                        logger.warning(f"Default composition file not found at: {default_comp_path}")
+                        print(f"[WARNING] Default composition file not found at: {default_comp_path}")
+                
+                # Extract parameters with defaults
+                max_peaks = inferred_params.get("max_peaks", 4)
+                r2_target = inferred_params.get("r2_target", 0.90)
+                max_attempts = inferred_params.get("max_attempts", 3)
+                reads_to_analyze = inferred_params.get("read_selection", "auto")
+                read_type = inferred_params.get("read_type", "em_spectrum")
+                wells_to_analyze = inferred_params.get("wells_to_analyze", None)
+                api_delay = inferred_params.get("api_delay_seconds", 0.5)
+                
+                logger.info(f"Parameters: max_peaks={max_peaks}, r2_target={r2_target}, "
+                          f"max_attempts={max_attempts}, reads={reads_to_analyze}, read_type={read_type}")
+                print(f"[INFO] Parameters: max_peaks={max_peaks}, r2_target={r2_target}, "
+                      f"max_attempts={max_attempts}, reads={reads_to_analyze}, read_type={read_type}")
+                
+                # Run curve fitting with inferred parameters
+                print(f"[INFO] Calling run_curve_fitting...")
+                logger.info(f"Calling run_curve_fitting with data: {data_path}, comp: {comp_file or 'None'}")
+                # Check if this is an auto-triggered run
+                is_auto_trigger = payload.get("auto_trigger", False) if payload else False
+                
+                results = self.run_curve_fitting(
+                    data_csv_path=str(data_path),
+                    composition_csv_path=comp_file or "",  # Empty string if not found
+                    wells_to_analyze=wells_to_analyze,
+                    reads_to_analyze=reads_to_analyze,
+                    read_type=read_type,
+                    max_peaks=max_peaks,
+                    r2_target=r2_target,
+                    max_attempts=max_attempts,
+                    save_plots=True,
+                    api_delay_seconds=api_delay,
+                    auto_trigger=is_auto_trigger,
+                )
+                
+                logger.info(f"Curve fitting completed for {data_path.name}")
+                logger.info(f"Results saved to: {results.get('output_dir', 'results/')}")
+                print(f"[INFO] Curve fitting completed for {data_path.name}")
+                print(f"[INFO] Results saved to: {results.get('output_dir', 'results/')}")
+                
+                # Store results in memory
+                try:
+                    if hasattr(memory, 'session_state') and memory.session_state:
+                        memory.session_state.curve_fitting_results = results
+                except Exception:
+                    pass
+                    
+            except Exception as e:
+                logger.error(f"Error running auto-triggered curve fitting: {e}", exc_info=True)
+                print(f"[ERROR] Error running auto-triggered curve fitting: {e}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                return
+        else:
+            # Debug: log why curve fitting wasn't triggered
+            import logging
+            logger = logging.getLogger(__name__)
+            if not auto_trigger:
+                logger.debug(f"Not auto-triggered. Payload: {payload}")
+            if not data_file:
+                logger.debug(f"No data file. Payload: {payload}")
+        
+        # Otherwise, UI is handled in pages/curve_fitting.py
         # This method exists to satisfy the abstract base class requirement
         pass
 
@@ -183,7 +378,8 @@ class CurveFittingAgent(BaseAgent):
         wavelength_step_size: Optional[int] = None,
         api_delay_seconds: Optional[float] = None,
         wells_to_ignore: Optional[List[str]] = None,
-        skip_no_peaks: bool = False  # Skip fitting if LLM detects no substantial peaks
+        skip_no_peaks: bool = False,  # Skip fitting if LLM detects no substantial peaks
+        auto_trigger: bool = False  # Whether this is an auto-triggered run from watcher
     ) -> Dict[str, Any]:
         """
         Run complete curve fitting analysis using Spectropus methodology.
@@ -205,6 +401,9 @@ class CurveFittingAgent(BaseAgent):
         Returns:
             Dictionary with analysis results
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         try:
             # Validate inputs
             if not os.path.exists(data_csv_path):
@@ -245,10 +444,16 @@ class CurveFittingAgent(BaseAgent):
             # Curate dataset with read type filtering (if needed)
             # This returns the filtered reads that match the requested type
             if read_type and read_type.lower() != "all":
-                curated, filtered_reads = self._curate_dataset_with_read_type(config, read_type, reads_to_analyze)
+                # Only apply first/last read filtering in auto mode
+                # In manual mode, use the user's selection as-is
+                read_selection_for_filtering = reads_to_analyze if not auto_trigger else reads_to_analyze
+                curated, filtered_reads = self._curate_dataset_with_read_type(config, read_type, read_selection_for_filtering, auto_trigger=auto_trigger)
                 # Use the filtered reads for analysis
                 actual_reads_to_analyze = filtered_reads
-                st.info(f"📊 Filtered to {len(filtered_reads)} {read_type} reads: {filtered_reads}")
+                if hasattr(st, 'info'):
+                    st.info(f"📊 Filtered to {len(filtered_reads)} {read_type} reads: {filtered_reads}")
+                logger.info(f"Final reads to analyze: {filtered_reads} (from original selection: {reads_to_analyze}, auto_trigger: {auto_trigger})")
+                print(f"[INFO] Final reads to analyze: {filtered_reads} (from original selection: {reads_to_analyze}, auto_trigger: {auto_trigger})")
             else:
                 from tools.fitting_agent import CurveFitting
                 agent = CurveFitting(config)
@@ -393,7 +598,7 @@ class CurveFittingAgent(BaseAgent):
                 "results": []
             }
 
-    def _curate_dataset_with_read_type(self, config: Any, read_type: str, original_read_selection: str = None) -> tuple:
+    def _curate_dataset_with_read_type(self, config: Any, read_type: str, original_read_selection: str = None, auto_trigger: bool = False) -> tuple:
         """
         Curate dataset with read type filtering.
 
@@ -401,10 +606,14 @@ class CurveFittingAgent(BaseAgent):
             config: Curve fitting configuration
             read_type: Type of reads to select ("em_spectrum" or "absorbance")
             original_read_selection: Original user read selection (e.g., "auto", "1,3")
+            auto_trigger: Whether this is an auto-triggered run from watcher
 
         Returns:
             Tuple of (curated dataset with filtered reads, list of filtered read numbers)
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         from tools.fitting_agent import CurveFitting
 
         # First curate normally (this will have all reads since we set read_selection="all")
@@ -440,20 +649,41 @@ class CurveFittingAgent(BaseAgent):
             matching_reads = [read_num for read_num, rtype in read_types.items()
                             if rtype == read_type.lower()]
 
-            # If original_read_selection was specified, filter further
-            if original_read_selection and original_read_selection.lower() not in ["auto", "all"]:
-                # Parse the original selection to get desired read numbers
-                from tools.fitting_agent import CurveFittingConfig
-                try:
-                    desired_reads = CurveFittingConfig._parse_int_list(original_read_selection)
-                    # Only keep reads that are both matching type AND in the desired list
-                    final_reads = [r for r in matching_reads if r in desired_reads]
-                except:
-                    # If parsing fails, use all matching reads
+            # Apply read filtering based on mode
+            if auto_trigger:
+                # AUTO MODE: Only use first and last read
+                if len(matching_reads) >= 2:
+                    final_reads = [matching_reads[0], matching_reads[-1]]
+                    logger.info(f"Auto mode: filtering to first and last reads from {len(matching_reads)} matching reads: {final_reads}")
+                    print(f"[INFO] Auto mode: filtering to first and last reads from {len(matching_reads)} matching reads: {final_reads}")
+                else:
+                    # Only one read available, use it
                     final_reads = matching_reads
+                    logger.info(f"Auto mode: only one read available, using: {final_reads}")
+                    print(f"[INFO] Auto mode: only one read available, using: {final_reads}")
             else:
-                # No specific selection, use all matching reads
-                final_reads = matching_reads
+                # MANUAL MODE: Use user's selection or all reads
+                if original_read_selection and original_read_selection.lower() not in ["auto", "all"]:
+                    # Parse the user's specific selection
+                    from tools.fitting_agent import CurveFittingConfig
+                    try:
+                        desired_reads = CurveFittingConfig._parse_int_list(original_read_selection)
+                        logger.info(f"Manual mode: user selected reads {desired_reads} from '{original_read_selection}'")
+                        print(f"[INFO] Manual mode: user selected reads {desired_reads} from '{original_read_selection}'")
+                        # Only keep reads that are both matching type AND in the desired list
+                        final_reads = [r for r in matching_reads if r in desired_reads]
+                        logger.info(f"Manual mode: filtered from {len(matching_reads)} matching reads to {len(final_reads)} final reads: {final_reads}")
+                        print(f"[INFO] Manual mode: filtered from {len(matching_reads)} matching reads to {len(final_reads)} final reads: {final_reads}")
+                    except Exception as e:
+                        # If parsing fails, use all matching reads
+                        logger.warning(f"Failed to parse read selection '{original_read_selection}': {e}, using all matching reads")
+                        print(f"[WARNING] Failed to parse read selection '{original_read_selection}': {e}, using all matching reads")
+                        final_reads = matching_reads
+                else:
+                    # No specific selection in manual mode - use all matching reads
+                    final_reads = matching_reads
+                    logger.info(f"Manual mode: no specific selection, using all {len(matching_reads)} matching reads")
+                    print(f"[INFO] Manual mode: no specific selection, using all {len(matching_reads)} matching reads")
 
             # Filter blocks based on final read list
             filtered_blocks = {}

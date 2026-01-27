@@ -1,0 +1,16 @@
+{
+  "triggered_file": "C:\\Users\\shery\\OneDrive - University of Tennessee\\Data Experiment files\\11-19-25-FuFA.csv",
+  "trigger_time": 1769550468.6019137,
+  "timestamp": "2026-01-27T16:47:48.601913",
+  "parameters": {
+    "max_peaks": 3,
+    "r2_target": 0.9,
+    "max_attempts": 3,
+    "read_type": "em_spectrum",
+    "read_selection": "auto",
+    "wells_to_analyze": null,
+    "plate_format": "96-well (8x12)",
+    "api_delay_seconds": 0.5
+  },
+  "file_size": 6622316
+}

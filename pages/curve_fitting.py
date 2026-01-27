@@ -2,7 +2,9 @@ import os
 import tempfile
 import json
 import re
+import time
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -10,7 +12,6 @@ import numpy as np
 from tools.memory import MemoryManager
 from agents.curve_fitting_agent import CurveFittingAgent
 import matplotlib.pyplot as plt
-import time
 
 memory = MemoryManager()
 memory.init_session()
@@ -25,12 +26,169 @@ if "plate_format" not in st.session_state:
 agent = CurveFittingAgent()
 
 st.set_page_config(layout="wide")
+
+# Check for auto-triggered file from watcher
+trigger_info_file = Path(__file__).parent.parent / "watcher_trigger_info.json"
+auto_triggered = False
+triggered_file = None
+
+# Track if we've already processed this trigger to avoid re-running
+if "last_processed_trigger_time" not in st.session_state:
+    st.session_state.last_processed_trigger_time = 0
+
+if trigger_info_file.exists():
+    try:
+        import time
+        with open(trigger_info_file, 'r') as f:
+            trigger_info = json.load(f)
+        
+        trigger_time = trigger_info.get("trigger_time", 0)
+        time_since_trigger = time.time() - trigger_time
+        
+        # Process if triggered within last 5 minutes and not already processed
+        if time_since_trigger < 300 and trigger_time != st.session_state.last_processed_trigger_time:
+            auto_triggered = True
+            triggered_file = trigger_info.get("triggered_file", "Unknown")
+            timestamp = trigger_info.get("timestamp", "")
+            inferred_params = trigger_info.get("parameters", {})
+            
+            # Mark as processed
+            st.session_state.last_processed_trigger_time = trigger_time
+            st.session_state.watcher_auto_triggered_file = triggered_file
+            st.session_state.watcher_auto_trigger_time = trigger_time
+            
+            # Show banner
+            st.success(
+                f"🔄 **Auto-triggered by Watcher!** File detected: `{Path(triggered_file).name}`\n"
+                f"📅 {timestamp}",
+                icon="🤖"
+            )
+            
+            # Check if results already exist (from previous headless run)
+            results_dir = Path(__file__).parent.parent / "results"
+            results_exist = False
+            if results_dir.exists():
+                json_files = list(results_dir.glob("*_peak_fit_results.json"))
+                if json_files:
+                    json_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                    latest_result = json_files[0]
+                    result_age = time.time() - latest_result.stat().st_mtime
+                    if result_age < 300:  # Results from last 5 minutes
+                        results_exist = True
+                        st.info(f"✅ **Results found from previous run:** `{latest_result.name}`")
+                        try:
+                            with open(latest_result, 'r') as f:
+                                result_data = json.load(f)
+                            st.session_state.auto_triggered_results = result_data
+                            st.session_state.auto_triggered_results_file = str(latest_result)
+                        except Exception:
+                            pass
+            
+            # If no results exist, automatically run curve fitting in Streamlit context
+            if not results_exist:
+                st.info("🚀 **Running curve fitting with UI support...**")
+                
+                # Prepare file path for curve fitting
+                data_path = Path(triggered_file)
+                if data_path.exists():
+                    # Extract parameters from trigger info
+                    max_peaks = inferred_params.get("max_peaks", 4)
+                    r2_target = inferred_params.get("r2_target", 0.90)
+                    max_attempts = inferred_params.get("max_attempts", 3)
+                    reads_to_analyze = inferred_params.get("read_selection", "auto")
+                    read_type = inferred_params.get("read_type", "em_spectrum")
+                    wells_to_analyze = inferred_params.get("wells_to_analyze", None)
+                    api_delay = inferred_params.get("api_delay_seconds", 0.5)
+                    
+                    # Look for composition file, fallback to default
+                    # Search for common composition file names in the same directory as the data file
+                    comp_file = None
+                    data_dir = data_path.parent
+                    # List of possible composition file names (searched in order)
+                    composition_file_names = [
+                        "composition.csv",
+                        "compositions.csv", 
+                        "comp.csv",
+                        "sample_info.csv",
+                        "sample_composition.csv",
+                        "well_composition.csv",
+                        "composition_data.csv"
+                    ]
+                    for comp_name in composition_file_names:
+                        comp_path = data_dir / comp_name
+                        if comp_path.exists():
+                            comp_file = str(comp_path)
+                            st.info(f"Found composition file in data directory: {comp_name}")
+                            break
+                    
+                    # If no composition file found, use default
+                    if not comp_file:
+                        default_comp_path = Path(__file__).parent.parent / "data" / "2D-3D.csv"
+                        if default_comp_path.exists():
+                            comp_file = str(default_comp_path)
+                            st.info(f"Using default composition file: {default_comp_path.name}")
+                    
+                    # Store parameters in session state for the run_curve_fitting call below
+                    st.session_state.auto_run_curve_fitting = True
+                    st.session_state.auto_run_data_file = str(data_path)
+                    st.session_state.auto_run_comp_file = comp_file or ""
+                    st.session_state.auto_run_params = {
+                        "max_peaks": max_peaks,
+                        "r2_target": r2_target,
+                        "max_attempts": max_attempts,
+                        "reads_to_analyze": reads_to_analyze,
+                        "read_type": read_type,
+                        "wells_to_analyze": wells_to_analyze,
+                        "api_delay_seconds": api_delay,
+                    }
+                else:
+                    st.error(f"File not found: {triggered_file}")
+        elif time_since_trigger >= 300:
+            # Clean up old trigger info
+            trigger_info_file.unlink(missing_ok=True)
+    except Exception as e:
+        # Silently handle errors reading trigger info
+        pass
+
 st.title("Curve Fitting")
 st.markdown("Upload CSV files, adjust parameters, and generate fitted curves with interactive visualizations.")
+
+# Check for automatic ML execution setting
+if "auto_ml_after_curve_fitting" not in st.session_state:
+    st.session_state.auto_ml_after_curve_fitting = False
+if "auto_route_to_analysis" not in st.session_state:
+    st.session_state.auto_route_to_analysis = False
 
 if st.button("Clear Cache and Restart Program"):
     st.cache_data.clear()
     st.rerun()
+
+# Workflow automation settings
+with st.expander("⚙️ Workflow Automation Settings", expanded=False):
+    col_auto1, col_auto2 = st.columns(2)
+    with col_auto1:
+        auto_ml_enabled = st.checkbox(
+            "Auto-run ML model after curve fitting",
+            value=st.session_state.auto_ml_after_curve_fitting,
+            help="Automatically run the selected ML model when curve fitting completes",
+            key="auto_ml_checkbox"
+        )
+        st.session_state.auto_ml_after_curve_fitting = auto_ml_enabled
+    
+    with col_auto2:
+        auto_route_analysis = st.checkbox(
+            "Auto-route to Analysis Agent after ML",
+            value=st.session_state.auto_route_to_analysis,
+            help="Automatically navigate to Analysis Agent after ML model completes",
+            key="auto_route_checkbox"
+        )
+        st.session_state.auto_route_to_analysis = auto_route_analysis
+    
+    if auto_ml_enabled:
+        selected_model = st.session_state.get("optimization_model_choice", "No model selected")
+        st.info(f"📊 Selected ML Model: **{selected_model}**")
+        if selected_model == "No model selected":
+            st.warning("⚠️ Please select an ML model on the ML Models page first.")
 
 workflow_outputs = st.session_state.get("workflow_experiment_outputs")
 if workflow_outputs:
@@ -571,13 +729,13 @@ def render_well_plate(format_name):
     # Compact selection control buttons
     c1, c2 = st.columns([1, 1])
     with c1:
-        if st.button("Select All", key="select_all_wells", use_container_width=True):
+        if st.button("Select All", key="select_all_wells", width='stretch'):
             for r in rows:
                 for c in cols:
                     st.session_state.selected_wells.add(f"{r}{c}")
             st.rerun()
     with c2:
-        if st.button("Clear All", key="clear_all_wells", use_container_width=True):
+        if st.button("Clear All", key="clear_all_wells", width='stretch'):
             st.session_state.selected_wells = set()
             st.rerun()
 
@@ -604,7 +762,7 @@ def render_well_plate(format_name):
                     key=f"btn_{well_id}",
                     help=f"Well {well_id}",
                     type="primary" if is_selected else "secondary",
-                    use_container_width=True
+                    width='stretch'
                 ):
                     if is_selected:
                         st.session_state.selected_wells.remove(well_id)
@@ -637,14 +795,21 @@ with col1:
 
 with col2:
     composition_file = st.file_uploader(
-        "Upload Composition CSV",
+        "Upload Composition CSV (Optional)",
         type=["csv"],
-        help="Upload the composition CSV file with well compositions",
+        help="Upload the composition CSV file with well compositions. If not provided, default file (2D-3D.csv) will be used.",
         key="cf_composition_uploader"
     )
     if composition_file:
         st.session_state.cf_composition_file = composition_file
         st.success(f"✅ Composition file uploaded: {composition_file.name}")
+    else:
+        # Show info about default file
+        default_comp_path = Path(__file__).parent.parent / "data" / "2D-3D.csv"
+        if default_comp_path.exists():
+            st.info(f"💡 Default composition file will be used: `{default_comp_path.name}`")
+        else:
+            st.warning(f"⚠️ Default composition file not found at: `{default_comp_path}`")
 
 # Use stored files if available
 data_file = st.session_state.cf_data_file
@@ -863,18 +1028,49 @@ st.header("🚀 Run Analysis")
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    run_button = st.button("Start Curve Fitting Analysis", type="primary", use_container_width=True)
+    run_button = st.button("Start Curve Fitting Analysis", type="primary", width='stretch')
 
 with col2:
-    if st.button("🗑️ Clear Files", use_container_width=True):
+    if st.button("🗑️ Clear Files", width='stretch'):
         st.session_state.cf_data_file = None
         st.session_state.cf_composition_file = None
         st.rerun()
 
-if run_button:
-    if not st.session_state.cf_data_file:
+# Check if we should auto-run from watcher trigger
+auto_run_triggered = st.session_state.get("auto_run_curve_fitting", False)
+
+if run_button or auto_run_triggered:
+    # If auto-running, use the triggered file
+    if auto_run_triggered:
+        triggered_file_path = st.session_state.auto_run_data_file
+        # Create a file-like object from the path for compatibility
+        class FileFromPath:
+            def __init__(self, path):
+                self.path = path
+                self.name = Path(path).name
+                self._path_obj = Path(path)
+            
+            def getvalue(self):
+                """Read file content from disk."""
+                if self._path_obj.exists():
+                    # Read as bytes first
+                    with open(self._path_obj, 'rb') as f:
+                        return f.read()
+                else:
+                    raise FileNotFoundError(f"File not found: {self.path}")
+        
+        data_file = FileFromPath(triggered_file_path)
+        st.session_state.cf_data_file = data_file
+        composition_file = None
+        if st.session_state.auto_run_comp_file:
+            composition_file = FileFromPath(st.session_state.auto_run_comp_file)
+            st.session_state.cf_composition_file = composition_file
+    elif not st.session_state.cf_data_file:
         st.error("❌ Please upload a spectral data file (CSV or Excel) before running analysis.")
         st.stop()
+    else:
+        data_file = st.session_state.cf_data_file
+        composition_file = st.session_state.cf_composition_file
 
     if not st.session_state.get('api_key'):
         st.error("❌ Please set your Google Gemini API key in Settings before running analysis.")
@@ -899,8 +1095,20 @@ if run_button:
                 # Get plate format from session state if available
                 plate_format = st.session_state.get('plate_format', None)
                 
+                # Get file content - handle both file uploader and FileFromPath
+                if hasattr(data_file, 'getvalue'):
+                    file_bytes = data_file.getvalue()
+                elif hasattr(data_file, 'path'):
+                    # It's a FileFromPath, read from disk
+                    with open(data_file.path, 'rb') as f:
+                        file_bytes = f.read()
+                else:
+                    # Try to read as path
+                    with open(data_file, 'rb') as f:
+                        file_bytes = f.read()
+                
                 csv_bytes = convert_excel_to_spectroscopy_csv(
-                    data_file.getvalue(), 
+                    file_bytes, 
                     data_file.name,
                     start_row=4,  # Data starts at row 4 (0-indexed)
                     read_start_col=1,  # Data starts at column 1 (column 0 is wavelength)
@@ -928,25 +1136,58 @@ if run_button:
         else:
             # Save CSV file as-is (handle encoding)
             try:
-                # Try to read and write as UTF-8
-                csv_content = data_file.getvalue()
+                # Get file content - handle both file uploader and FileFromPath
+                if hasattr(data_file, 'getvalue'):
+                    csv_content = data_file.getvalue()
+                elif hasattr(data_file, 'path'):
+                    # It's a FileFromPath, read from disk
+                    with open(data_file.path, 'rb') as f:
+                        csv_content = f.read()
+                else:
+                    # Try to read as path
+                    with open(data_file, 'rb') as f:
+                        csv_content = f.read()
+                
+                # Handle encoding
                 if isinstance(csv_content, bytes):
                     # Try to decode as UTF-8, fallback to latin-1 if needed
                     try:
                         csv_content = csv_content.decode('utf-8')
                     except UnicodeDecodeError:
                         csv_content = csv_content.decode('latin-1')
+                
                 with open(data_path, "w", encoding='utf-8') as f:
                     f.write(csv_content)
             except Exception as e:
-                # Fallback to binary write
-                with open(data_path, "wb") as f:
-                    f.write(data_file.getvalue() if isinstance(data_file.getvalue(), bytes) else data_file.getvalue().encode('utf-8'))
+                # Fallback: copy file directly if it's a path
+                if hasattr(data_file, 'path') and Path(data_file.path).exists():
+                    import shutil
+                    shutil.copy2(data_file.path, data_path)
+                elif hasattr(data_file, 'getvalue'):
+                    # It's a file uploader object - last resort: binary write
+                    with open(data_path, "wb") as f:
+                        file_content = data_file.getvalue()
+                        f.write(file_content if isinstance(file_content, bytes) else file_content.encode('utf-8'))
+                else:
+                    raise Exception(f"Cannot read file: {data_file}. Error: {e}")
 
-        # Handle composition file
+        # Handle composition file - use default if not provided
+        default_comp_path = Path(__file__).parent.parent / "data" / "2D-3D.csv"
+        
         if composition_file:
             try:
-                comp_content = composition_file.getvalue()
+                # Get file content - handle both file uploader and FileFromPath
+                if hasattr(composition_file, 'getvalue'):
+                    comp_content = composition_file.getvalue()
+                elif hasattr(composition_file, 'path'):
+                    # It's a FileFromPath, read from disk
+                    with open(composition_file.path, 'rb') as f:
+                        comp_content = f.read()
+                else:
+                    # Try to read as path
+                    with open(composition_file, 'rb') as f:
+                        comp_content = f.read()
+                
                 if isinstance(comp_content, bytes):
                     try:
                         comp_content = comp_content.decode('utf-8')
@@ -955,42 +1196,62 @@ if run_button:
                 with open(comp_path, "w", encoding='utf-8') as f:
                     f.write(comp_content)
             except Exception as e:
-                # Fallback to binary write
-                with open(comp_path, "wb") as f:
-                    f.write(composition_file.getvalue())
+                # Fallback: copy file directly if it's a path
+                if hasattr(composition_file, 'path') and Path(composition_file.path).exists():
+                    import shutil
+                    shutil.copy2(composition_file.path, comp_path)
+                else:
+                    # Last resort: binary write
+                    with open(comp_path, "wb") as f:
+                        if hasattr(composition_file, 'getvalue'):
+                            f.write(composition_file.getvalue())
+                        else:
+                            # Use default file if reading fails
+                            if default_comp_path.exists():
+                                import shutil
+                                shutil.copy2(default_comp_path, comp_path)
+                                st.info(f"Using default composition file: {default_comp_path.name}")
+                            else:
+                                st.warning(f"Could not read composition file: {e}")
         else:
-            # Create dummy composition CSV for Excel files
-            if is_excel:
-                st.warning("⚠️ No composition file provided. Creating dummy composition file for Excel data.")
-                try:
-                    # Read the converted CSV to get well names
-                    with open(data_path, 'r', encoding='utf-8') as f:
-                        csv_content = f.read()
-                    
-                    # Find all well names (R1, R2, etc.) from the CSV
-                    well_pattern = re.compile(r'R\d+')
-                    well_names = list(set(well_pattern.findall(csv_content)))
-                    well_names.sort(key=lambda x: int(x[1:]))  # Sort by number
-                    
-                    if not well_names:
-                        # Fallback: create wells based on number of reads detected
-                        # Count "Read N:" headers
-                        read_pattern = re.compile(r'Read\s+(\d+):')
-                        read_numbers = [int(m.group(1)) for m in read_pattern.findall(csv_content)]
-                        well_names = [f"R{n}" for n in sorted(read_numbers)]
-                    
-                    dummy_csv_content = create_dummy_composition_csv(well_names)
-                    with open(comp_path, "w", encoding='utf-8') as f:
-                        f.write(dummy_csv_content)
-                    st.info(f"✅ Created dummy composition file with {len(well_names)} acquisitions/reads: {well_names[:10]}{'...' if len(well_names) > 10 else ''}")
-                except Exception as e:
-                    st.error(f"❌ Error creating composition file: {str(e)}")
-                    import traceback
-                    st.exception(e)
-                    st.stop()
+            # Use default composition file
+            if default_comp_path.exists():
+                import shutil
+                shutil.copy2(default_comp_path, comp_path)
+                st.info(f"Using default composition file: {default_comp_path.name}")
             else:
-                st.error("❌ Please upload a composition CSV file before running analysis.")
-                st.stop()
+                # Create dummy composition CSV for Excel files as last resort
+                if is_excel:
+                    st.warning("⚠️ No composition file provided and default not found. Creating dummy composition file for Excel data.")
+                    try:
+                        # Read the converted CSV to get well names
+                        with open(data_path, 'r', encoding='utf-8') as f:
+                            csv_content = f.read()
+                        
+                        # Find all well names (R1, R2, etc.) from the CSV
+                        well_pattern = re.compile(r'R\d+')
+                        well_names = list(set(well_pattern.findall(csv_content)))
+                        well_names.sort(key=lambda x: int(x[1:]))  # Sort by number
+                        
+                        if not well_names:
+                            # Fallback: create wells based on number of reads detected
+                            # Count "Read N:" headers
+                            read_pattern = re.compile(r'Read\s+(\d+):')
+                            read_numbers = [int(m.group(1)) for m in read_pattern.findall(csv_content)]
+                            well_names = [f"R{n}" for n in sorted(read_numbers)]
+                        
+                        dummy_csv_content = create_dummy_composition_csv(well_names)
+                        with open(comp_path, "w", encoding='utf-8') as f:
+                            f.write(dummy_csv_content)
+                        st.info(f"✅ Created dummy composition file with {len(well_names)} acquisitions/reads: {well_names[:10]}{'...' if len(well_names) > 10 else ''}")
+                    except Exception as e:
+                        st.error(f"❌ Error creating composition file: {str(e)}")
+                        import traceback
+                        st.exception(e)
+                        st.stop()
+                else:
+                    st.error(f"❌ No composition file provided and default file not found at: {default_comp_path}")
+                    st.stop()
 
         # Determine wells to analyze based on visual selection
         # If no wells selected, default to all wells (passing None to the agent)
@@ -1055,6 +1316,26 @@ if run_button:
             st.error("❌ No EM Spectrum reads found in your data file! Check your data format.")
             st.stop()
 
+        # Check if we should auto-run curve fitting from watcher trigger
+        if st.session_state.get("auto_run_curve_fitting", False):
+            # Use auto-run parameters
+            data_path = st.session_state.auto_run_data_file
+            comp_path = st.session_state.auto_run_comp_file
+            auto_params = st.session_state.auto_run_params
+            wells_to_analyze = auto_params.get("wells_to_analyze")
+            reads_selection = auto_params.get("reads_to_analyze", "auto")
+            read_type_filter = auto_params.get("read_type", "em_spectrum")
+            max_peaks = auto_params.get("max_peaks", 4)
+            r2_target = auto_params.get("r2_target", 0.90)
+            max_attempts = auto_params.get("max_attempts", 3)
+            api_delay_seconds = auto_params.get("api_delay_seconds", 0.5)
+            
+            # Clear the auto-run flag
+            st.session_state.auto_run_curve_fitting = False
+            
+            # Show that we're running automatically
+            st.info("🚀 **Auto-running curve fitting with detected file...**")
+        
         # Create progress tracking
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -1063,6 +1344,9 @@ if run_button:
             status_text.text("Starting curve fitting analysis...")
 
             # Run the analysis
+            # Check if this is an auto-triggered run
+            is_auto_trigger = st.session_state.get("auto_run_curve_fitting", False) or auto_triggered
+            
             result = agent.run_curve_fitting(
                 data_csv_path=data_path,
                 composition_csv_path=comp_path,
@@ -1078,7 +1362,8 @@ if run_button:
                 start_wavelength=start_wavelength,
                 end_wavelength=end_wavelength,
                 wavelength_step_size=wavelength_step_size,
-                api_delay_seconds=api_delay_seconds
+                api_delay_seconds=api_delay_seconds,
+                auto_trigger=is_auto_trigger
             )
 
             progress_bar.progress(1.0)
@@ -1086,6 +1371,77 @@ if run_button:
 
             if result["success"]:
                 st.success(f"✅ Analysis completed successfully! Processed {result['summary']['total_wells']} wells.")
+                
+                # Check if ML Models step is next in workflow and marked as automatic
+                workflow_auto_flags = st.session_state.get("workflow_auto_flags", {})
+                manual_workflow = st.session_state.get("manual_workflow", [])
+                workflow_index = st.session_state.get("workflow_index", 0)
+                
+                # Check if ML Models is next and should auto-execute
+                ml_auto_from_workflow = (
+                    workflow_index < len(manual_workflow)
+                    and manual_workflow[workflow_index] == "ML Models"
+                    and workflow_auto_flags.get("ML Models", False)
+                )
+                
+                # Automatic ML model execution (if enabled via checkbox OR workflow)
+                auto_ml_enabled = (
+                    st.session_state.get("auto_ml_after_curve_fitting", False)
+                    or ml_auto_from_workflow
+                )
+                selected_ml_model = st.session_state.get("optimization_model_choice")
+                
+                if auto_ml_enabled and selected_ml_model:
+                    with st.spinner("🤖 Automatically running ML model..."):
+                        try:
+                            from tools.ml_automation import run_automated_ml_model
+                            
+                            # Get ML model configuration from session state
+                            ml_config = st.session_state.get("ml_model_config", {})
+                            
+                            # Get file paths from result
+                            json_file = result.get("files", {}).get("json_results")
+                            csv_file = result.get("files", {}).get("csv_export")
+                            
+                            # Run ML model automatically
+                            ml_result = run_automated_ml_model(
+                                model_choice=selected_ml_model,
+                                json_path=json_file,
+                                csv_path=csv_file,
+                                auto_config=ml_config,
+                            )
+                            
+                            if ml_result.get("success"):
+                                st.success(f"✅ ML Model ({selected_ml_model}) executed successfully!")
+                                
+                                # Display top candidates
+                                if ml_result.get("top_candidates"):
+                                    st.subheader("🤖 ML Model Recommendations")
+                                    import pandas as pd
+                                    candidates_df = pd.DataFrame(ml_result["top_candidates"])
+                                    st.dataframe(candidates_df, width='stretch')
+                                
+                                # Save ML results to session state for Analysis Agent
+                                st.session_state.gp_results = {
+                                    "model_type": ml_result.get("model_type", "Unknown"),
+                                    "automated": True,
+                                    "top_candidates": ml_result.get("top_candidates", []),
+                                    "predictions": ml_result.get("predictions", {}),
+                                    "uncertainty_stats": ml_result.get("uncertainty_stats", {}),
+                                }
+                                st.session_state.analysis_ready = True
+                                
+                                # Auto-route to Analysis Agent if enabled
+                                if st.session_state.get("auto_route_to_analysis", False):
+                                    st.info("🔄 Routing to Analysis Agent...")
+                                    st.session_state.next_agent = "analysis"
+                                    st.rerun()
+                            else:
+                                st.warning(f"⚠️ ML Model execution failed: {ml_result.get('error', 'Unknown error')}")
+                        except Exception as e:
+                            st.warning(f"⚠️ Automatic ML model execution failed: {str(e)}")
+                            import traceback
+                            st.exception(e)
 
                 # Display summary
                 col1, col2, col3 = st.columns(3)
@@ -1134,7 +1490,7 @@ if run_button:
                                 })
                             
                             peaks_df = pd.DataFrame(peak_data)
-                            st.dataframe(peaks_df, use_container_width=True)
+                            st.dataframe(peaks_df, width='stretch')
 
                         # Show fitting plot if available (matplotlib with download)
                         if 'files' in well_result and 'fitting_plot' in well_result['files']:
@@ -1154,7 +1510,7 @@ if run_button:
                                         data=file,
                                         file_name=f"fitting_plot_{well_name}_read{read_num}.png",
                                         mime="image/png",
-                                        use_container_width=True,
+                                        width='stretch',
                                         key=unique_key
                                     )
 
@@ -1184,7 +1540,7 @@ if run_button:
                                 json_data,
                                 f"{base_name}_peak_fit_results.json",
                                 "application/json",
-                                use_container_width=True,
+                                width='stretch',
                                 key=json_key
                             )
 
@@ -1201,7 +1557,7 @@ if run_button:
                                 csv_data,
                                 f"{base_name}_peak_fit_export.csv",
                                 "text/csv",
-                                use_container_width=True,
+                                width='stretch',
                                 key=csv_key
                             )
 
@@ -1293,7 +1649,7 @@ MAPbI3,0.0,0.0,0.5
         sample_data,
         "sample_spectral_data.csv",
         "text/csv",
-        use_container_width=True,
+        width='stretch',
         key="download_sample_spectral"
     )
 
@@ -1302,7 +1658,7 @@ MAPbI3,0.0,0.0,0.5
         sample_composition,
         "sample_composition.csv",
         "text/csv",
-        use_container_width=True,
+        width='stretch',
         key="download_sample_composition"
     )
 

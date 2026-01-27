@@ -608,6 +608,41 @@ IMPORTANT: Please synthesize a hypothesis that considers full conversation conte
 """
 
 
+ANALYSIS_NEW_QUESTION_INSTRUCTIONS = """You are helping refine a research question based on experimental results and a research goal.
+
+**Context:**
+- You have experimental results from curve fitting and ML model analysis
+- You have a research goal that guides the overall direction
+- You need to generate a NEW, refined research question that will guide the next round of experiments
+
+**Your Task:**
+1. Analyze the experimental results and identify key findings
+2. Consider the research goal and how the results relate to it
+3. Generate a NEW research question that:
+   - Builds upon the current results
+   - Addresses gaps or uncertainties revealed by the analysis
+   - Moves toward achieving the research goal
+   - Is specific, testable, and actionable
+   - Incorporates insights from completed experiments (to avoid repetition)
+
+**Format:**
+Provide a single, well-formulated research question that can guide the next experimental cycle.
+
+## Research Goal
+{research_goal}
+
+## Analysis Results Summary
+{analysis_summary}
+
+## Completed Experiments
+{completed_experiments}
+
+## Current Hypothesis
+{current_hypothesis}
+
+Generate a refined research question that builds on these results and moves toward the goal.
+"""
+
 def get_prompt(name: str) -> str:
     """Fetch a system prompt by key ('numeric', 'image', 'refine', 'guardrails', 'plate_sweep')."""
     if name not in PROMPTS:
@@ -693,4 +728,88 @@ Return ONLY one of the following:
 - "NOT_READY" if more exploration is needed
 
 Do not provide explanations, just the single word response.
+"""
+
+ANALYSIS_INSTRUCTIONS = """You are a scientific analysis expert evaluating experimental results in the context of a research hypothesis and experimental design. Your task is to provide a comprehensive analysis that relates curve fitting results to the original hypothesis and experimental plan, determines if the hypothesis is supported, identifies if more experiments are needed, and explains the results using relevant scientific literature.
+
+**Provided Information:**
+1. **Hypothesis Context**: The original research hypothesis, research question, and socratic analysis that led to the hypothesis
+2. **Experimental Context**: The experimental plan, worklist, and design that was executed
+3. **Curve Fitting Results Summary**: Summary statistics and key findings from curve fitting analysis
+4. **Full Results**: Complete detailed results (if available) for deeper analysis
+
+**Your Task:**
+1. **Relate Results to Hypothesis**: 
+   - Compare the curve fitting results to the predictions made in the hypothesis
+   - Identify which aspects of the hypothesis are supported or contradicted by the data
+   - Assess the quality and reliability of the fits (R² values, peak positions, etc.)
+   - Determine if the results align with expected outcomes
+
+2. **Evaluate Hypothesis Status**:
+   - **Confirmed**: Results strongly support the hypothesis with high-quality data
+   - **Needs Revision**: Results partially support but suggest modifications are needed
+   - **Rejected**: Results contradict the hypothesis
+   - **Needs More Data**: Results are inconclusive and require additional experiments
+
+3. **Assess Need for More Experiments**:
+   - Determine if the current data is sufficient to draw conclusions
+   - Identify gaps in the experimental design or data quality
+   - Recommend specific additional experiments if needed, including:
+     * What parameters should be varied
+     * What conditions should be tested
+     * What measurements would strengthen the conclusions
+
+4. **Provide Literature-Backed Explanations**:
+   - Explain the observed results using established scientific principles from your training data
+   - Reference relevant mechanisms, theories, or known phenomena from scientific literature
+   - Compare findings to similar studies or known examples
+   - Explain what the peak positions, intensities, and fitting quality indicate about the material system
+
+5. **Assess Impact and Significance**:
+   - Explain the scientific significance of the findings
+   - Discuss implications for the research question
+   - Identify potential applications or next steps
+   - Highlight any unexpected or novel observations
+
+**Response Format:**
+Structure your analysis as follows:
+
+## Hypothesis Evaluation
+[State whether the hypothesis is confirmed, needs revision, rejected, or needs more data. Explain your reasoning based on the results.]
+
+## Results Analysis
+[Detailed analysis of the curve fitting results, including:
+- Quality of fits (R² values, peak positions, etc.)
+- Comparison to hypothesis predictions
+- Key findings and patterns
+- Statistical significance and reliability]
+
+## Literature Context
+[Explain the results using relevant scientific literature and established principles:
+- Mechanisms that explain the observed behavior
+- Comparison to similar systems or studies
+- Theoretical foundations for the observations
+- Known examples or precedents from literature]
+
+## Experimental Recommendations
+[If more experiments are needed, provide specific recommendations:
+- What additional measurements would strengthen conclusions
+- What parameters should be varied
+- What conditions should be tested
+- Prioritize recommendations based on importance]
+
+## Impact Assessment
+[Discuss the significance and implications:
+- Scientific importance of the findings
+- Implications for the research question
+- Potential applications or next steps
+- Novel or unexpected observations]
+
+**CRITICAL REQUIREMENTS:**
+- Base all explanations on established scientific principles from your training data
+- Provide specific, actionable recommendations if more experiments are needed
+- Use scientific terminology appropriately
+- Be objective and evidence-based in your evaluation
+- Clearly distinguish between supported findings and areas needing more data
+- Reference relevant mechanisms, theories, or literature examples when explaining results
 """
