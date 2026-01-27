@@ -182,7 +182,8 @@ class CurveFittingAgent(BaseAgent):
         end_wavelength: Optional[int] = None,
         wavelength_step_size: Optional[int] = None,
         api_delay_seconds: Optional[float] = None,
-        wells_to_ignore: Optional[List[str]] = None
+        wells_to_ignore: Optional[List[str]] = None,
+        skip_no_peaks: bool = False  # Skip fitting if LLM detects no substantial peaks
     ) -> Dict[str, Any]:
         """
         Run complete curve fitting analysis using Spectropus methodology.
@@ -319,6 +320,7 @@ class CurveFittingAgent(BaseAgent):
                         llm=llm,
                         reads=actual_reads_to_analyze,
                         max_peaks=max_peaks,
+                        skip_no_peaks=skip_no_peaks,
                         r2_target=r2_target,
                         max_attempts=max_attempts,
                         save_plots=save_plots
@@ -528,6 +530,7 @@ class CurveFittingAgent(BaseAgent):
                 llm=llm,
                 reads=read or "auto",
                 max_peaks=max_peaks,
+                skip_no_peaks=skip_no_peaks,
                 model_kind=model_kind,
                 save_plots=True
             )

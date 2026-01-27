@@ -72,16 +72,21 @@ import re
 
 READ_HEADER_PATTERN = re.compile(r"^Read\s+(\d+):EM\s+Spectrum\s*$", re.I)
 
-def convert_excel_to_spectroscopy_csv(file_bytes: bytes, filename: str, start_row: int = 4, read_start_col: int = 1) -> bytes:
+def convert_excel_to_spectroscopy_csv(file_bytes: bytes, filename: str, start_row: int = 2, read_start_col: int = 1, plate_format: str = None) -> bytes:
     """
-    Convert Excel file with wavelength in column 0 and reads in columns 1+ 
+    Convert Excel file with wavelength in column 0 and data in columns 1+ 
     to the CSV format expected by the fitting agent.
+    
+    Can handle two formats:
+    1. Well plate format: Columns represent wells (A1-E7 for 35-well, A1-H12 for 96-well)
+    2. Acquisition format: Each column is a separate read/acquisition (R1, R2, etc.)
     
     Args:
         file_bytes: Excel file bytes
         filename: Original filename
         start_row: Row where data starts (0-indexed, default 4)
-        read_start_col: Column index where read/acquisition data starts (default 1, column 0 is wavelength)
+        read_start_col: Column index where data starts (default 1, column 0 is wavelength)
+        plate_format: Plate format string ("35-well (5x7)" or "96-well (8x12)") to determine well naming
     
     Returns:
         CSV file bytes in the format expected by the fitting agent
@@ -90,82 +95,246 @@ def convert_excel_to_spectroscopy_csv(file_bytes: bytes, filename: str, start_ro
         # Read Excel file
         df = pd.read_excel(BytesIO(file_bytes), sheet_name=0, header=None)
         
-        # Find where actual numeric data starts by checking for numeric values in column 0
-        # Skip header rows (like "Wavelength [nm]", "Timestamp", etc.)
-        data_start_row = start_row
-        for i in range(min(10, len(df))):  # Check first 10 rows
-            try:
-                val = df.iloc[i, 0]
-                if pd.notna(val):
-                    numeric_val = pd.to_numeric(val, errors='coerce')
-                    if pd.notna(numeric_val) and numeric_val > 100:  # Wavelengths are typically > 100nm
-                        data_start_row = i
+        # Check if this is a well plate format (35-well or 96-well) that needs Read header parsing
+        is_well_plate_format = plate_format and ("35-well" in plate_format or "96-well" in plate_format)
+        
+        data_start_row = None
+        wavelength_col = 1  # Default to column 1
+        
+        # If this is a well-plate export, we want to preserve multiple "Read N" blocks
+        # (Cytation exports frequently stack multiple reads vertically).
+        read_block_starts: Dict[int, int] = {}
+
+        if is_well_plate_format:
+            # For 35-well and 96-well plates: Parse "Read N:EM Spectrum" headers
+            read_header_pattern = re.compile(r"^Read\s+(\d+)[:\s]+(?:EM\s+)?Spectrum", re.I)
+            
+            # Check column 0 and column 1 for Read headers
+            for col_idx in [0, 1]:
+                for i in range(min(500, len(df))):  # Scan deeper; Cytation exports can be long
+                    try:
+                        val = str(df.iloc[i, col_idx]).strip()
+                        m = read_header_pattern.match(val)
+                        if m:
+                            read_num = int(m.group(1))
+                            read_block_starts.setdefault(read_num, i)
+                    except Exception:
+                        continue
+
+            read_block_starts = dict(sorted(read_block_starts.items()))
+            
+            # If we found Read headers, we'll extract each Read block separately later.
+            # Otherwise, we'll fall back to numeric detection and treat as a single block.
+        
+        # If data_start_row not found yet (no Read headers or Insitu format), use numeric detection
+        if data_start_row is None:
+            # Strategy 1: Check column 1 (wavelength column) for wavelength-like values (>= 50nm)
+            for i in range(min(100, len(df))):  # Check first 100 rows
+                try:
+                    val = df.iloc[i, 1]  # Check column 1 (wavelength column)
+                    if pd.notna(val):
+                        numeric_val = pd.to_numeric(val, errors='coerce')
+                        if pd.notna(numeric_val) and numeric_val >= 50 and numeric_val <= 2000:
+                            data_start_row = i
+                            wavelength_col = 1
+                            break
+                except:
+                    continue
+            
+            # Strategy 2: Check column 0 as fallback
+            if data_start_row is None:
+                for i in range(min(100, len(df))):
+                    try:
+                        val = df.iloc[i, 0]
+                        if pd.notna(val):
+                            numeric_val = pd.to_numeric(val, errors='coerce')
+                            if pd.notna(numeric_val) and numeric_val >= 50 and numeric_val <= 2000:
+                                data_start_row = i
+                                wavelength_col = 0
+                                break
+                    except:
+                        continue
+            
+            # Strategy 3: Use default start_row if still not found
+            if data_start_row is None:
+                data_start_row = start_row if start_row < len(df) else 2
+                wavelength_col = 1
+        
+        # -------- Extract data into blocks --------
+        blocks: List[tuple[int, pd.Series, pd.DataFrame]] = []
+
+        def _find_block_data_start(read_header_row: int) -> tuple[int, int]:
+            """Return (data_start_row, wavelength_col) for a given read header row."""
+            for rr in range(read_header_row + 1, min(read_header_row + 25, len(df))):
+                for cc in [1, 2]:
+                    try:
+                        numeric_val = pd.to_numeric(df.iloc[rr, cc], errors='coerce')
+                        if pd.notna(numeric_val) and 50 <= float(numeric_val) <= 2000:
+                            return rr, cc
+                    except Exception:
+                        continue
+            return read_header_row + 2, 1
+
+        def _contiguous_wavelength_end(start_r: int, wl_c: int, end_r: int) -> int:
+            """Return the first row AFTER the contiguous wavelength run."""
+            r = start_r
+            while r < end_r:
+                try:
+                    v = pd.to_numeric(df.iloc[r, wl_c], errors='coerce')
+                    if pd.isna(v) or not (50 <= float(v) <= 2000):
                         break
-            except:
-                continue
-        
-        # Extract wavelength column (column 0, starting from data_start_row)
-        wavelength = df.iloc[data_start_row:, 0].copy()
-        
-        # Extract read columns (columns from read_start_col onward)
-        read_data = df.iloc[data_start_row:, read_start_col:].copy()
-        
-        # Convert to numeric
-        wavelength = pd.to_numeric(wavelength, errors='coerce')
-        read_data = read_data.apply(pd.to_numeric, errors='coerce')
-        
-        # Remove rows with NaN wavelength
-        valid_mask = ~wavelength.isna()
-        wavelength = wavelength[valid_mask]
-        read_data = read_data[valid_mask]
+                except Exception:
+                    break
+                r += 1
+            return r
+
+        if is_well_plate_format and read_block_starts:
+            read_nums = sorted(read_block_starts.keys())
+            for i_rn, read_num in enumerate(read_nums):
+                header_row = read_block_starts[read_num]
+                next_header = read_block_starts[read_nums[i_rn + 1]] if i_rn + 1 < len(read_nums) else len(df)
+                dsr, wlc = _find_block_data_start(header_row)
+                end_data = _contiguous_wavelength_end(dsr, wlc, next_header)
+
+                wavelength = pd.to_numeric(df.iloc[dsr:end_data, wlc].copy(), errors='coerce')
+                read_data_start_col = wlc + 1
+                read_data = df.iloc[dsr:end_data, read_data_start_col:].copy().apply(pd.to_numeric, errors='coerce')
+
+                valid_mask = wavelength.notna() & (wavelength >= 50) & (wavelength <= 2000)
+                wavelength = wavelength[valid_mask].reset_index(drop=True)
+                read_data = read_data[valid_mask].reset_index(drop=True)
+
+                if len(wavelength) > 0 and read_data.shape[1] > 0:
+                    blocks.append((read_num, wavelength, read_data))
+        else:
+            # Single-block fallback (insitu or no Read headers)
+            wavelength = pd.to_numeric(df.iloc[data_start_row:, wavelength_col].copy(), errors='coerce')
+            read_start_col_actual = wavelength_col + 1
+            read_data = df.iloc[data_start_row:, read_start_col_actual:].copy().apply(pd.to_numeric, errors='coerce')
+
+            # If wavelength column doesn't look like wavelengths, check if first data column might be wavelengths
+            wavelength_valid = wavelength.notna().sum()
+            wavelength_in_range = ((wavelength >= 50) & (wavelength <= 2000)).sum() if wavelength_valid > 0 else 0
+            if wavelength_in_range == 0 and read_data.shape[1] > 0:
+                first_data_col = read_data.iloc[:, 0]
+                first_data_numeric = pd.to_numeric(first_data_col, errors='coerce')
+                first_data_in_range = ((first_data_numeric >= 50) & (first_data_numeric <= 2000)).sum()
+                if first_data_in_range > wavelength_valid:
+                    wavelength = first_data_numeric.reset_index(drop=True)
+                    read_data = read_data.iloc[:, 1:].reset_index(drop=True)
+
+            valid_mask = wavelength.notna() & (wavelength >= 50) & (wavelength <= 2000)
+            wavelength = wavelength[valid_mask].reset_index(drop=True)
+            read_data = read_data[valid_mask].reset_index(drop=True)
+
+            if len(wavelength) > 0 and read_data.shape[1] > 0:
+                blocks.append((1, wavelength, read_data))
+
+        if not blocks:
+            raise ValueError("No valid wavelength/data blocks could be extracted from this Excel file.")
         
         # Use all available data rows (no artificial limit)
         # Note: User's plotting code uses 1:400, but we'll process all available data
         # If needed, users can filter by wavelength range in the UI
         
+        # Determine if this is a well plate format or acquisition format
+        num_columns = blocks[0][2].shape[1]
+        is_well_plate = False
+        well_names = []
+        
+        # Check if plate_format is specified and matches well plate format
+        if plate_format and ("35-well" in plate_format or "96-well" in plate_format):
+            is_well_plate = True
+            # Generate well names based on plate format
+            # If we have exactly 35 data columns, prefer 35-well naming even if UI selection is off.
+            # This matches typical Cytation5 35-well exports.
+            if num_columns == 35 or "35-well" in plate_format:
+                # 35-well plate: A1-E7 (5 rows x 7 columns)
+                rows = ['A', 'B', 'C', 'D', 'E']
+                cols = list(range(1, 8))
+            else:  # 96-well
+                # 96-well plate: A1-H12 (8 rows x 12 columns)
+                rows = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+                cols = list(range(1, 13))
+            
+            # Generate well names in order
+            for row in rows:
+                for col in cols:
+                    well_names.append(f"{row}{col}")
+            
+            # Limit to actual number of columns available
+            well_names = well_names[:num_columns]
+        elif plate_format and "insitu" in plate_format.lower():
+            # Insitu Well format: Each column is a separate acquisition/read
+            # Use acquisition format (separate read blocks)
+            is_well_plate = False
+            well_names = [f"R{i+1}" for i in range(num_columns)]
+        else:
+            # Default: Acquisition format: use R1, R2, etc.
+            is_well_plate = False
+            well_names = [f"R{i+1}" for i in range(num_columns)]
+        
         # Create CSV format expected by fitting agent
-        # Format: Read 1:EM Spectrum header, then wavelength and well columns
-        # The fitting agent's _slice_block drops column 0, so we need:
-        # - Column 0: "Read N:EM Spectrum" (will be in first col, then dropped)
-        # - Empty line
-        # - Column 0: "Wavelength" (will be dropped), Column 1: Well name (R1, R2, etc.)
-        # - Data rows: wavelength in col 0 (dropped), intensity in col 1
         csv_lines = []
         
-        # For each read column, create a "Read N:EM Spectrum" block
-        num_reads = read_data.shape[1]
-        
-        for read_num in range(1, num_reads + 1):
-            # Add read header - use consistent 3-column format
-            # Column 0: Read header, Columns 1-2: empty (will be dropped)
-            csv_lines.append(f"Read {read_num}:EM Spectrum,,")
+        if is_well_plate:
+            # Well plate format (35-well or 96-well): Single read block with multiple well columns
+            # Format per block: Read N:EM Spectrum header -> spacer -> column header -> data
             
-            # Empty line after header - use 3 columns to match format
-            csv_lines.append(",,,")
-            
-            # Create data block with wavelength and this read's data
-            read_col = read_data.iloc[:, read_num - 1]
-            
-            # Create well names - use R1, R2, etc. format (now accepted by fitting agent)
-            # YES, we're keeping BOTH formats:
-            # - A1-H12 format for regular well plates (still fully supported)
-            # - R1-R2 format for acquisitions/reads (newly added support)
-            well_name = f"R{read_num}"
-            
-            # Build the data block header
-            # Format: Column 0 = placeholder (dropped), Column 1 = Wavelength, Column 2 = Well name
-            # After _slice_block drops col 0: Column 0 = Wavelength, Column 1 = Well name
-            csv_lines.append(f"Placeholder,Wavelength,{well_name}")
-            
-            # Add data rows - all with 3 columns for consistency
-            for idx in range(len(wavelength)):
-                wl_val = wavelength.iloc[idx]
-                intensity_val = read_col.iloc[idx]
-                if pd.notna(wl_val) and pd.notna(intensity_val):
-                    csv_lines.append(f"P,{wl_val},{intensity_val}")
-            
-            # Add empty line between reads - use 3 columns to match
-            csv_lines.append(",,,")
+            # Keep column counts consistent across all lines so pandas doesn't drop lines.
+            # Total columns = Wavelength + wells
+            total_cols = 1 + len(well_names)
+
+            for read_num, wavelength, read_data in blocks:
+                # Read header (pad with commas to match total_cols)
+                csv_lines.append(f"Read {read_num}:EM Spectrum" + "," * (total_cols - 1))
+                # Spacer line (all empty fields, but with correct column count)
+                csv_lines.append("," * (total_cols - 1))
+                # Column header
+                csv_lines.append("Wavelength," + ",".join(well_names))
+                # Data rows
+                for idx in range(len(wavelength)):
+                    wl_val = wavelength.iloc[idx]
+                    if pd.isna(wl_val):
+                        continue
+                    row_data = [str(wl_val)]
+                    for col_idx in range(num_columns):
+                        if col_idx < read_data.shape[1]:
+                            intensity_val = read_data.iloc[idx, col_idx]
+                            row_data.append(str(intensity_val) if pd.notna(intensity_val) else "")
+                        else:
+                            row_data.append("")
+                    csv_lines.append(",".join(row_data))
+        else:
+            # Acquisition format (Insitu Well): Each column is a separate read
+            # For each read column, create a "Read N:EM Spectrum" block
+            # Insitu uses the first (and only) block in `blocks`
+            _, wavelength, read_data = blocks[0]
+            num_columns = read_data.shape[1]
+            for read_num in range(1, num_columns + 1):
+                # Keep column counts consistent (Wavelength + 1 acquisition column)
+                # Add read header (pad with comma)
+                csv_lines.append(f"Read {read_num}:EM Spectrum,")
+                
+                # Empty line after header
+                csv_lines.append(",")
+                
+                # Create data block with wavelength and this read's data
+                read_col = read_data.iloc[:, read_num - 1]
+                well_name = well_names[read_num - 1]
+                
+                # Build the data block header (NO Placeholder column)
+                csv_lines.append(f"Wavelength,{well_name}")
+                
+                # Add data rows
+                for idx in range(len(wavelength)):
+                    wl_val = wavelength.iloc[idx]
+                    intensity_val = read_col.iloc[idx]
+                    if pd.notna(wl_val) and pd.notna(intensity_val):
+                        csv_lines.append(f"{wl_val},{intensity_val}")
+                
+                # Add empty line between reads
+                csv_lines.append(",")
         
         # Convert to bytes
         csv_content = "\n".join(csv_lines)
@@ -371,9 +540,12 @@ def render_well_plate(format_name):
     if format_name == "96-well (8x12)":
         rows = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
         cols = list(range(1, 13))
-    else:  # 35-well (5x7)
+    elif format_name == "35-well (5x7)":
         rows = ['A', 'B', 'C', 'D', 'E']
         cols = list(range(1, 8))
+    else:  # Insitu Well (Acquisitions) - no well selector needed
+        st.info("💡 Insitu Well format: Each column represents a separate acquisition/read (R1, R2, R3, etc.)")
+        return  # Don't render well selector for acquisition format
 
     # CSS for smaller circular buttons with tighter spacing
     st.markdown("""
@@ -584,10 +756,18 @@ with col2:
 
 with col3:
     st.markdown("**Well Selection Mode**")
+    plate_format_options = ["96-well (8x12)", "35-well (5x7)", "Insitu Well (Acquisitions)"]
+    current_format = st.session_state.get('plate_format', "96-well (8x12)")
+    default_index = 0
+    if current_format == "35-well (5x7)":
+        default_index = 1
+    elif "insitu" in current_format.lower():
+        default_index = 2
+    
     plate_format = st.selectbox(
         "Select Plate Format",
-        ["96-well (8x12)", "35-well (5x7)"],
-        index=0 if st.session_state.plate_format == "96-well (8x12)" else 1,
+        plate_format_options,
+        index=default_index,
         key="plate_format_selector"
     )
     if plate_format != st.session_state.plate_format:
@@ -600,6 +780,12 @@ with col3:
     render_well_plate(st.session_state.plate_format)
 
     save_plots = st.checkbox("Save Fitting Plots", value=True, help="Generate and save fitting visualization plots")
+    
+    skip_no_peaks = st.checkbox(
+        "Skip Fitting for Noisy/Flat Spectra",
+        value=False,
+        help="If enabled, skip fitting when LLM detects no substantial peaks (saves time on noisy/flat spectra). Results will show 0 peaks."
+    )
     
     # API Rate Limiting
     st.markdown("**⚡ API Rate Limiting**")
@@ -710,15 +896,29 @@ if run_button:
         if is_excel:
             try:
                 st.info("📊 Converting Excel file to CSV format...")
+                # Get plate format from session state if available
+                plate_format = st.session_state.get('plate_format', None)
+                
                 csv_bytes = convert_excel_to_spectroscopy_csv(
                     data_file.getvalue(), 
                     data_file.name,
                     start_row=4,  # Data starts at row 4 (0-indexed)
-                    read_start_col=1  # Reads start at column 1 (column 0 is wavelength)
+                    read_start_col=1,  # Data starts at column 1 (column 0 is wavelength)
+                    plate_format=plate_format  # Pass plate format to determine well naming
                 )
                 # Write as text file with UTF-8 encoding
+                csv_content = csv_bytes.decode('utf-8')
                 with open(data_path, "w", encoding='utf-8') as f:
-                    f.write(csv_bytes.decode('utf-8'))
+                    f.write(csv_content)
+                
+                # Debug: Show first few lines of generated CSV and verify structure
+                lines = csv_content.split('\n')[:15]
+                st.text(f"DEBUG: First 15 lines of generated CSV:\n" + "\n".join(lines))
+                
+                # Debug: Check column counts
+                line_col_counts = [len(line.split(',')) for line in lines if line.strip()]
+                st.text(f"DEBUG: Column counts per line: {line_col_counts}")
+                
                 st.success("✅ Excel file converted successfully!")
             except Exception as e:
                 st.error(f"❌ Error converting Excel file: {str(e)}")
@@ -874,6 +1074,7 @@ if run_button:
                 r2_target=r2_target,
                 max_attempts=max_attempts,
                 save_plots=save_plots,
+                skip_no_peaks=skip_no_peaks,
                 start_wavelength=start_wavelength,
                 end_wavelength=end_wavelength,
                 wavelength_step_size=wavelength_step_size,
@@ -976,13 +1177,15 @@ if run_button:
                         if os.path.exists(json_path):
                             with open(json_path, 'r') as f:
                                 json_data = f.read()
+                            # Use stable key based on file path to prevent rerun
+                            json_key = f"download_json_{hash(json_path)}"
                             col1.download_button(
                                 "📄 Download JSON Results",
                                 json_data,
                                 f"{base_name}_peak_fit_results.json",
                                 "application/json",
                                 use_container_width=True,
-                                key=f"download_json_{int(time.time())}"
+                                key=json_key
                             )
 
                     # CSV export
@@ -991,13 +1194,15 @@ if run_button:
                         if os.path.exists(csv_path):
                             with open(csv_path, 'r') as f:
                                 csv_data = f.read()
+                            # Use stable key based on file path to prevent rerun
+                            csv_key = f"download_csv_{hash(csv_path)}"
                             col2.download_button(
                                 "📊 Download CSV Export",
                                 csv_data,
                                 f"{base_name}_peak_fit_export.csv",
                                 "text/csv",
                                 use_container_width=True,
-                                key=f"download_csv_{int(time.time())}"
+                                key=csv_key
                             )
 
             else:

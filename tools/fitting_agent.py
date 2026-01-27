@@ -378,6 +378,358 @@ class PeakResult:
     baseline: Optional[float] = None
 
 
+def smooth_spectrum(
+    y: np.ndarray,
+    window_size: Optional[int] = None,
+    method: str = "savgol"
+) -> np.ndarray:
+    """
+    Smooth spectrum data to reduce noise while preserving peak shapes.
+    
+    Args:
+        y: Intensity array
+        window_size: Size of smoothing window (auto-calculated if None)
+        method: Smoothing method - "savgol" (Savitzky-Golay, best) or "moving_avg" (simple)
+    
+    Returns:
+        Smoothed intensity array
+    """
+    if len(y) < 3:
+        return y  # Too short to smooth
+    
+    # Auto-calculate window size: ~3% of data length (stronger smoothing), but at least 5 and odd
+    if window_size is None:
+        window_size = max(5, int(len(y) * 0.03))  # Increased from 0.01 to 0.03 for stronger smoothing
+        if window_size % 2 == 0:
+            window_size += 1  # Make odd for Savitzky-Golay
+        window_size = min(window_size, len(y) - 1)  # Can't be larger than data
+    
+    # Ensure window_size is odd and valid
+    if window_size % 2 == 0:
+        window_size += 1
+    window_size = min(window_size, len(y) - 1)
+    if window_size < 3:
+        return y
+    
+    try:
+        if method == "savgol":
+            # Try Savitzky-Golay filter (best for preserving peak shapes)
+            from scipy.signal import savgol_filter
+            # Use polynomial order 2 (quadratic) for smooth curves
+            # window_length must be odd and less than data length
+            poly_order = min(2, window_size - 1)
+            return savgol_filter(y, window_length=window_size, polyorder=poly_order)
+        else:
+            # Fallback to simple moving average
+            from scipy.ndimage import uniform_filter1d
+            return uniform_filter1d(y, size=window_size, mode='nearest')
+    except (ImportError, ValueError):
+        # Fallback to simple numpy-based moving average
+        # Use convolution for moving average
+        kernel = np.ones(window_size) / window_size
+        # Pad edges to maintain length
+        y_padded = np.pad(y, (window_size//2, window_size//2), mode='edge')
+        smoothed = np.convolve(y_padded, kernel, mode='valid')
+        return smoothed
+
+
+def has_substantial_peaks(
+    x: np.ndarray,
+    y: np.ndarray,
+    llm_result: PeakResult,
+    min_snr: float = 4.0,  # Balanced: not too strict, not too lenient
+    min_peak_height_frac: float = 0.12,  # Balanced: catch real peaks but reject noise
+    edge_trim_frac: float = 0.1,  # Ignore first/last 10% of wavelength range (edge artifacts)
+    return_debug: bool = False  # Return debug info about why peaks were rejected
+) -> Union[bool, Tuple[bool, Dict[str, Any]]]:
+    """
+    Check if spectrum has substantial peaks (not just noise or flat baseline).
+    Uses multiple criteria to avoid fitting noisy spectra.
+    Ignores edge artifacts at beginning/end of wavelength range.
+    
+    Args:
+        x: Wavelength array
+        y: Intensity array
+        llm_result: LLM peak detection result
+        min_snr: Minimum signal-to-noise ratio for a peak to be considered substantial
+        min_peak_height_frac: Minimum peak height as fraction of max intensity
+        edge_trim_frac: Fraction of wavelength range to ignore at edges (default 0.1 = 10%)
+    
+    Returns:
+        True if substantial peaks are detected, False otherwise
+    """
+    if len(y) == 0 or len(x) == 0:
+        return False
+    
+    # Trim edge artifacts (first and last edge_trim_frac of wavelength range)
+    if edge_trim_frac > 0:
+        trim_start = int(len(x) * edge_trim_frac)
+        trim_end = int(len(x) * (1 - edge_trim_frac))
+        if trim_end > trim_start:
+            x_trimmed = x[trim_start:trim_end]
+            y_trimmed = y[trim_start:trim_end]
+        else:
+            # If trimming would remove everything, use full range
+            x_trimmed = x
+            y_trimmed = y
+    else:
+        x_trimmed = x
+        y_trimmed = y
+    
+    # Check if LLM found any peaks
+    # If LLM didn't find peaks, do a quick check for obvious peaks in the data
+    if not llm_result.peaks or len(llm_result.peaks) == 0:
+        # Fallback: Check if there's an obvious peak in the trimmed data
+        # Look for local maxima that are significantly above baseline
+        baseline_est = np.percentile(y_trimmed, 15) if len(y_trimmed) > 0 else np.percentile(y, 15)
+        y_centered_est = y_trimmed - baseline_est if len(y_trimmed) > 0 else y - baseline_est
+        noise_est = 1.4826 * np.median(np.abs(y_centered_est)) if len(y_centered_est) > 0 else np.std(y_centered_est)
+        
+        if noise_est > 0:
+            # Find local maxima using simple peak detection (fallback if LLM missed peaks)
+            try:
+                from scipy.signal import find_peaks
+                # Require peaks to be at least 3× noise above baseline
+                min_height = baseline_est + 3.0 * noise_est
+                peaks_found, properties = find_peaks(y_trimmed, height=min_height, distance=len(y_trimmed)//20)
+                
+                if len(peaks_found) > 0:
+                    # Check if any peak is substantial
+                    peak_heights = y_trimmed[peaks_found] - baseline_est
+                    max_peak_height = np.max(peak_heights) if len(peak_heights) > 0 else 0
+                    dynamic_range_est = np.max(y_trimmed) - np.min(y_trimmed) if len(y_trimmed) > 0 else 0
+                    
+                    # If we found a peak that's > 3× noise and > 10% of dynamic range, it's substantial
+                    if max_peak_height >= 3.0 * noise_est and (dynamic_range_est > 0 and max_peak_height / dynamic_range_est >= 0.10):
+                        print(f"      Fallback: Found substantial peak in data even though LLM didn't detect it")
+                        if return_debug:
+                            debug_info['reason'] = 'Fallback peak detection found substantial peak'
+                            debug_info['max_peak_height'] = float(max_peak_height)
+                            debug_info['noise_est'] = float(noise_est)
+                            debug_info['snr'] = float(max_peak_height / noise_est) if noise_est > 0 else 0
+                            return True, debug_info
+                        return True
+            except ImportError:
+                # If scipy not available, use simple numpy-based peak detection
+                # Find local maxima manually
+                if len(y_trimmed) > 3:
+                    # Simple peak detection: find points higher than neighbors
+                    diff = np.diff(y_trimmed)
+                    local_maxima = []
+                    for i in range(1, len(diff)):
+                        if diff[i-1] > 0 and diff[i] < 0:  # Peak: goes up then down
+                            peak_val = y_trimmed[i]
+                            if peak_val >= baseline_est + 3.0 * noise_est:
+                                local_maxima.append(peak_val)
+                    
+                    if len(local_maxima) > 0:
+                        max_peak_height = max(local_maxima) - baseline_est
+                        dynamic_range_est = np.max(y_trimmed) - np.min(y_trimmed)
+                        if max_peak_height >= 3.0 * noise_est and (dynamic_range_est > 0 and max_peak_height / dynamic_range_est >= 0.10):
+                            print(f"      Fallback: Found substantial peak in data even though LLM didn't detect it")
+                            if return_debug:
+                                debug_info['reason'] = 'Fallback peak detection found substantial peak'
+                                debug_info['max_peak_height'] = float(max_peak_height)
+                                debug_info['noise_est'] = float(noise_est)
+                                debug_info['snr'] = float(max_peak_height / noise_est) if noise_est > 0 else 0
+                                return True, debug_info
+                            return True
+            except Exception:
+                pass  # If peak detection fails, continue with normal checks
+        
+        if return_debug:
+            debug_info['reason'] = 'LLM found no peaks and fallback detection found none'
+            debug_info['baseline_est'] = float(baseline_est) if 'baseline_est' in locals() else None
+            debug_info['noise_est'] = float(noise_est) if 'noise_est' in locals() and noise_est > 0 else None
+            return False, debug_info
+        return False
+    
+    # Filter out peaks that are in the edge regions (likely artifacts)
+    valid_peaks = []
+    x_min_valid = x_trimmed.min() if len(x_trimmed) > 0 else x.min()
+    x_max_valid = x_trimmed.max() if len(x_trimmed) > 0 else x.max()
+    
+    for peak in llm_result.peaks:
+        # Only consider peaks within the valid (trimmed) wavelength range
+        if x_min_valid <= peak.center <= x_max_valid:
+            valid_peaks.append(peak)
+    
+    if len(valid_peaks) == 0:
+        # All peaks are in edge regions - likely edge artifacts
+        if return_debug:
+            debug_info['reason'] = 'All LLM peaks are in edge regions (trimmed out)'
+            debug_info['llm_peaks_count'] = len(llm_result.peaks)
+            debug_info['valid_wavelength_range'] = f'{x_min_valid:.1f}-{x_max_valid:.1f} nm'
+            return False, debug_info
+        return False
+    
+    # If LLM detected too many peaks, it might be fitting noise
+    # More than 6 peaks in a single spectrum is suspicious
+    if len(valid_peaks) > 6:
+        print(f"      Warning: LLM detected {len(valid_peaks)} peaks - likely fitting noise")
+        # Still check if any are substantial, but be more skeptical
+    
+    # Use trimmed data for baseline and noise calculations (ignore edge artifacts)
+    # Calculate baseline using robust method (median of lower percentile)
+    baseline = llm_result.baseline if llm_result.baseline is not None else np.percentile(y_trimmed, 15)
+    
+    # Calculate noise level using robust method (MAD - Median Absolute Deviation)
+    # This is more robust to outliers than std
+    y_centered = y_trimmed - baseline
+    median_abs_dev = np.median(np.abs(y_centered)) if len(y_centered) > 0 else 0
+    noise_level = 1.4826 * median_abs_dev if median_abs_dev > 0 else (np.std(y_centered) if len(y_centered) > 1 else 0)
+    
+    if noise_level == 0 or noise_level < 1e-6:
+        # Flat spectrum - no peaks
+        if return_debug:
+            debug_info['reason'] = 'Noise level is zero (flat spectrum)'
+            debug_info['noise_level'] = float(noise_level)
+            return False, debug_info
+        return False
+    
+    # Use trimmed data for signal calculations
+    y_max = np.max(y_trimmed) if len(y_trimmed) > 0 else np.max(y)
+    y_min = np.min(y_trimmed) if len(y_trimmed) > 0 else np.min(y)
+    y_median = np.median(y_trimmed) if len(y_trimmed) > 0 else np.median(y)
+    dynamic_range = y_max - y_min
+    
+    # Check 1: Overall noise-to-signal ratio
+    # If noise is too high relative to signal, spectrum is too noisy
+    signal_level = y_max - baseline
+    noise_to_signal_ratio = noise_level / signal_level if signal_level > 0 else np.inf
+    if noise_to_signal_ratio > 0.3:  # If noise is >30% of signal, too noisy
+        if return_debug:
+            debug_info['reason'] = f'Noise-to-signal ratio too high ({noise_to_signal_ratio:.3f} > 0.3)'
+            debug_info['noise_level'] = float(noise_level)
+            debug_info['signal_level'] = float(signal_level)
+            debug_info['y_max'] = float(y_max)
+            debug_info['baseline'] = float(baseline)
+            return False, debug_info
+        return False
+    
+    # Check 2: Check if spectrum is mostly flat (low variance in trimmed region)
+    # If the trimmed region has very low variance, it's likely just flat baseline
+    # But be careful - a spectrum with one big peak might have low overall variance
+    # So only reject if variance is very low AND there's no obvious peak
+    y_trimmed_var = np.var(y_trimmed) if len(y_trimmed) > 1 else 0
+    y_trimmed_mean = np.mean(y_trimmed) if len(y_trimmed) > 0 else 0
+    # Only reject if variance is less than 2% of mean AND dynamic range is small
+    if y_trimmed_mean > 0 and y_trimmed_var / y_trimmed_mean < 0.02 and dynamic_range < noise_level * 2.0:
+        if return_debug:
+            debug_info['reason'] = 'Spectrum too flat (low variance and small dynamic range)'
+            debug_info['variance'] = float(y_trimmed_var)
+            debug_info['mean'] = float(y_trimmed_mean)
+            debug_info['variance_ratio'] = float(y_trimmed_var / y_trimmed_mean) if y_trimmed_mean > 0 else 0
+            debug_info['dynamic_range'] = float(dynamic_range)
+            return False, debug_info
+        return False
+    
+    # Check 3: Dynamic range check
+    if dynamic_range < noise_level * min_snr:
+        if return_debug:
+            debug_info['reason'] = f'Dynamic range too small ({dynamic_range:.1f} < {noise_level * min_snr:.1f})'
+            debug_info['dynamic_range'] = float(dynamic_range)
+            debug_info['noise_level'] = float(noise_level)
+            debug_info['min_snr'] = min_snr
+            debug_info['required_range'] = float(noise_level * min_snr)
+            return False, debug_info
+        return False
+    
+    # Check 4: If all peaks are very small relative to noise, likely just noise
+    max_peak_height = max((p.height - baseline for p in valid_peaks), default=0)
+    if max_peak_height < noise_level * 3.0:  # Even the tallest peak is less than 3× noise
+        if return_debug:
+            debug_info['reason'] = f'All peaks too small relative to noise (max peak height {max_peak_height:.1f} < {noise_level * 3.0:.1f})'
+            debug_info['max_peak_height'] = float(max_peak_height)
+            debug_info['noise_level'] = float(noise_level)
+            debug_info['required_height'] = float(noise_level * 3.0)
+            debug_info['valid_peaks_count'] = len(valid_peaks)
+            return False, debug_info
+        return False
+    
+    # Check 5: Verify peaks actually exist in the data (only check valid peaks, not edge artifacts)
+    # For each LLM-detected peak, check if there's actually a local maximum nearby
+    substantial_peaks_found = 0
+    for peak in valid_peaks:
+        # Find the index closest to the detected peak center (in trimmed data)
+        peak_idx = np.argmin(np.abs(x_trimmed - peak.center))
+        
+        # Check if this is actually a local maximum in the raw data
+        # Look at a window around the peak (about ±20nm or ±10 data points)
+        window_size = min(10, len(y_trimmed) // 10)
+        start_idx = max(0, peak_idx - window_size)
+        end_idx = min(len(y_trimmed), peak_idx + window_size + 1)
+        
+        if start_idx >= end_idx:
+            continue
+        
+        local_data = y_trimmed[start_idx:end_idx]
+        local_max_idx = np.argmax(local_data)
+        actual_peak_value = local_data[local_max_idx]
+        
+        # Check if the actual peak value in data is close to LLM's predicted height
+        # Allow more tolerance (LLM might over/underestimate significantly)
+        # Use the actual peak value from data, not LLM's prediction, for SNR calculation
+        height_ratio = actual_peak_value / peak.height if peak.height > 0 else 0
+        # More lenient: allow 0.3 to 3.0 range (LLM can be off by 3×)
+        if height_ratio < 0.3 or height_ratio > 3.0:
+            # LLM peak doesn't match actual data - likely noise
+            continue
+        
+        # Check peak height relative to baseline and noise
+        peak_above_baseline = actual_peak_value - baseline
+        peak_snr = peak_above_baseline / noise_level if noise_level > 0 else 0
+        
+        # Check peak height relative to max intensity
+        peak_height_frac = peak_above_baseline / dynamic_range if dynamic_range > 0 else 0
+        
+        # Peak is substantial if it meets all criteria:
+        # 1. High SNR (signal well above noise)
+        # 2. Significant fraction of dynamic range
+        # 3. Actually exists in the data (verified above)
+        if peak_snr >= min_snr and peak_height_frac >= min_peak_height_frac:
+            substantial_peaks_found += 1
+    
+    # Require at least one verified substantial peak
+    if substantial_peaks_found > 0:
+        if return_debug:
+            debug_info['reason'] = 'Substantial peaks found'
+            debug_info['substantial_peaks_count'] = substantial_peaks_found
+            debug_info['valid_peaks_count'] = len(valid_peaks)
+            return True, debug_info
+        return True
+    else:
+        if return_debug:
+            debug_info['reason'] = 'No peaks passed all verification criteria'
+            debug_info['valid_peaks_count'] = len(valid_peaks)
+            debug_info['substantial_peaks_found'] = 0
+            debug_info['min_snr_required'] = min_snr
+            debug_info['min_height_frac_required'] = min_peak_height_frac
+            # Add info about why peaks failed
+            peak_failures = []
+            for peak in valid_peaks[:3]:  # Check first 3 peaks
+                peak_idx = np.argmin(np.abs(x_trimmed - peak.center))
+                window_size = min(10, len(y_trimmed) // 10)
+                start_idx = max(0, peak_idx - window_size)
+                end_idx = min(len(y_trimmed), peak_idx + window_size + 1)
+                if start_idx < end_idx:
+                    local_data = y_trimmed[start_idx:end_idx]
+                    actual_peak_value = np.max(local_data)
+                    peak_above_baseline = actual_peak_value - baseline
+                    peak_snr = peak_above_baseline / noise_level if noise_level > 0 else 0
+                    peak_height_frac = peak_above_baseline / dynamic_range if dynamic_range > 0 else 0
+                    peak_failures.append({
+                        'center': float(peak.center),
+                        'height': float(peak.height),
+                        'actual_value': float(actual_peak_value),
+                        'snr': float(peak_snr),
+                        'height_frac': float(peak_height_frac)
+                    })
+            debug_info['peak_failures'] = peak_failures
+            return False, debug_info
+        return False
+
+
 # ---------- Plotting (for vision path) ----------
 
 try:
@@ -476,6 +828,109 @@ def pick_good_peaks(
                 'frac'     : float(frac),
             })
     return accepted
+
+
+def merge_close_peaks(
+    peaks: List[Dict[str, float]],
+    min_separation_factor: float = 2.0
+) -> List[Dict[str, float]]:
+    """
+    Merge peaks that are too close together (within min_separation_factor × average FWHM).
+    
+    When two peaks are too close, they likely represent a single physical peak that was
+    over-fitted with two components. This function merges them into a single peak based on
+    the total fit characteristics.
+    
+    Args:
+        peaks: List of peak dicts with keys: center_nm, FWHM_nm, height, area, etc.
+        min_separation_factor: Minimum separation as multiple of average FWHM (default 2.0)
+    
+    Returns:
+        List of merged peaks (fewer peaks if any were merged)
+    """
+    if len(peaks) <= 1:
+        return peaks
+    
+    # Sort peaks by center wavelength
+    sorted_peaks = sorted(peaks, key=lambda p: p['center_nm'])
+    merged = []
+    
+    i = 0
+    while i < len(sorted_peaks):
+        current_peak = sorted_peaks[i].copy()
+        
+        # Look ahead to see if next peak(s) should be merged with current
+        j = i + 1
+        peaks_to_merge = [current_peak]
+        
+        while j < len(sorted_peaks):
+            next_peak = sorted_peaks[j]
+            
+            # Calculate average FWHM of peaks being considered
+            avg_fwhm = np.mean([p['FWHM_nm'] for p in peaks_to_merge + [next_peak]])
+            min_separation = min_separation_factor * avg_fwhm
+            
+            # Check if peaks are too close
+            separation = abs(next_peak['center_nm'] - current_peak['center_nm'])
+            
+            if separation < min_separation:
+                # Peaks are too close - merge them
+                peaks_to_merge.append(next_peak)
+                j += 1
+            else:
+                # Peaks are far enough apart - stop merging
+                break
+        
+        # Merge the peaks: weighted average of centers, sum of areas/heights
+        if len(peaks_to_merge) == 1:
+            # No merging needed
+            merged.append(current_peak)
+        else:
+            # Merge multiple peaks into one
+            # Weight center by area (larger peak has more influence)
+            total_area = sum(p['area'] for p in peaks_to_merge)
+            if total_area > 0:
+                weighted_center = sum(p['center_nm'] * p['area'] for p in peaks_to_merge) / total_area
+            else:
+                weighted_center = np.mean([p['center_nm'] for p in peaks_to_merge])
+            
+            # Sum heights and areas
+            total_height = sum(p['height'] for p in peaks_to_merge)
+            total_area = sum(p['area'] for p in peaks_to_merge)
+            
+            # FWHM: weighted average by area, or use the largest FWHM if peaks overlap significantly
+            if total_area > 0:
+                weighted_fwhm = sum(p['FWHM_nm'] * p['area'] for p in peaks_to_merge) / total_area
+            else:
+                weighted_fwhm = np.mean([p['FWHM_nm'] for p in peaks_to_merge])
+            
+            # If peaks are very close (within 1 FWHM), use larger FWHM to capture full width
+            if len(peaks_to_merge) > 1:
+                max_separation = max(
+                    abs(p2['center_nm'] - p1['center_nm'])
+                    for i, p1 in enumerate(peaks_to_merge)
+                    for p2 in peaks_to_merge[i+1:]
+                )
+                avg_fwhm_merged = np.mean([p['FWHM_nm'] for p in peaks_to_merge])
+                if max_separation < avg_fwhm_merged:
+                    # Peaks overlap significantly - use larger FWHM
+                    weighted_fwhm = max(p['FWHM_nm'] for p in peaks_to_merge)
+            
+            # Create merged peak
+            merged_peak = {
+                'id': current_peak.get('id', 'merged'),
+                'center_nm': float(weighted_center),
+                'FWHM_nm': float(weighted_fwhm),
+                'height': float(total_height),
+                'amplitude': float(total_area),  # Use area as amplitude proxy
+                'area': float(total_area),
+                'frac': sum(p.get('frac', 0) for p in peaks_to_merge),
+            }
+            merged.append(merged_peak)
+        
+        i = j
+    
+    return merged
 
 
 def compute_peak_asymmetry(
@@ -784,6 +1239,9 @@ def save_all_wells_results(all_results: List[Dict[str, object]], filename: str =
             fit_result, metrics, x_data, result['data']['y'],
             window=wavelength_window, min_height_snr=3.0, min_area_frac=0.02  # More lenient thresholds
         )
+        
+        # Merge peaks that are too close together (representing a single physical peak)
+        good_peaks = merge_close_peaks(good_peaks, min_separation_factor=2.0)
 
         consolidated_data["wells"][well_name] = {
             "read": result['read'],
@@ -847,7 +1305,7 @@ def export_peak_data_to_csv(all_results: List[Dict[str, object]], filename: str 
 
         # Check if this result has quality_peaks already processed
         if 'quality_peaks' in result:
-            # Use pre-processed quality peaks
+            # Use pre-processed quality peaks (already merged in save_all_wells_results)
             quality_peaks = result['quality_peaks']
         else:
             # Fallback: create comprehensive metrics and use pick_good_peaks
@@ -873,6 +1331,12 @@ def export_peak_data_to_csv(all_results: List[Dict[str, object]], filename: str 
                 fit_result, metrics, x_data, result['data']['y'],
                 window=wavelength_window, min_height_snr=3.0, min_area_frac=0.02
             )
+            
+            # Merge peaks that are too close together (representing a single physical peak)
+            quality_peaks = merge_close_peaks(quality_peaks, min_separation_factor=2.0)
+            
+            # Merge peaks that are too close together (representing a single physical peak)
+            quality_peaks = merge_close_peaks(quality_peaks, min_separation_factor=2.0)
 
         # Create row data
         row_data = {
@@ -1170,6 +1634,28 @@ def select_model_for_spectrum(llm: LLMClient, x: np.ndarray, y: np.ndarray, well
         return "gaussian"
 
 
+def create_skipped_fit_result(x: np.ndarray, y: np.ndarray, model_kind: str = "gaussian") -> PeakFitResult:
+    """Create a skipped fit result for spectra with no substantial peaks."""
+    baseline = float(np.percentile(y, 10)) if len(y) > 0 else 0.0
+    return PeakFitResult(
+        success=False,
+        stats=PeakFitStats(
+            r2=0.0,
+            rmse=float(np.std(y)) if len(y) > 0 else 0.0,
+            aic=np.inf,
+            bic=np.inf,
+            redchi=np.inf,
+            nfev=0
+        ),
+        best_params={},
+        peaks=[],
+        baseline=baseline,
+        report="Skipped: No substantial peaks detected (spectrum is too noisy or flat)",
+        model_kind=model_kind,
+        lmfit_result=None
+    )
+
+
 def run_complete_analysis(
     config: 'CurveFittingConfig',
     well_name: str,
@@ -1179,7 +1665,8 @@ def run_complete_analysis(
     model_kind: Optional[str] = None,
     r2_target: float = 0.90,
     max_attempts: int = 3,
-    save_plots: bool = True  # Set to False to skip saving final PNG files (LLM analysis still runs)
+    save_plots: bool = True,  # Set to False to skip saving final PNG files (LLM analysis still runs)
+    skip_no_peaks: bool = False  # Skip fitting if LLM detects no substantial peaks
 ) -> Union[Dict[str, object], List[Dict[str, object]]]:
     """Run complete analysis workflow for a single well with flexible read selection."""
 
@@ -1214,7 +1701,9 @@ def run_complete_analysis(
         print(f"  Selecting model type for {well_name}...")
         # Use first read for model selection
         x_sample, y_sample = get_xy_for_well(config, well_name, read=target_reads[0])
-        model_kind = select_model_for_spectrum(llm, x_sample, y_sample, well_name)
+        # Smooth sample data for model selection too
+        y_sample_smoothed = smooth_spectrum(y_sample, method="savgol")
+        model_kind = select_model_for_spectrum(llm, x_sample, y_sample_smoothed, well_name)
         print(f"  LLM selected model: {model_kind}")
 
     # Analyze all target reads efficiently
@@ -1224,13 +1713,19 @@ def run_complete_analysis(
         print(f"    Processing read {read}...")
         x, y = get_xy_for_well(config, well_name, read=read)
 
-        # LLM numeric analysis (backup)
+        # Smooth spectrum slightly to reduce noise and make peaks more apparent
+        # This helps LLM detection and improves fitting quality
+        y_smoothed = smooth_spectrum(y, method="savgol")
+        print(f"      Applied light smoothing to reduce noise")
+
+        # LLM numeric analysis (backup) - use smoothed data for better peak detection
         sys_prompt_numeric = get_prompt("numeric")
-        llm_result = llm_guess_peaks(llm, x, y, use_image=False, system_prompt=sys_prompt_numeric, max_peaks=max_peaks)
+        llm_result = llm_guess_peaks(llm, x, y_smoothed, use_image=False, system_prompt=sys_prompt_numeric, max_peaks=max_peaks)
 
         # LLM image analysis (PRIMARY - visual analysis is more reliable)
+        # Use smoothed data for image so LLM sees cleaner peaks
         temp_spectrum_path = f'analysis_output/temp_spectrum_{well_name}_read{read}.png'
-        save_plot_png(x, y, temp_spectrum_path, title=f'PL Spectrum - Well {well_name} Read {read}')
+        save_plot_png(x, y_smoothed, temp_spectrum_path, title=f'PL Spectrum - Well {well_name} Read {read}')
 
         sys_prompt_image = get_prompt("image")
         llm_image_result = llm_guess_peaks_from_image(llm, temp_spectrum_path, system_prompt=sys_prompt_image, max_peaks=max_peaks)
@@ -1246,17 +1741,41 @@ def run_complete_analysis(
         peaks_to_use = llm_image_result if llm_image_result.peaks else llm_result
         print(f"      Using {'image' if llm_image_result.peaks else 'numeric'}-based peaks: {len(peaks_to_use.peaks)} peaks")
 
+        # Check if we should skip fitting for noisy/flat spectra
+        # Use smoothed data for peak detection check
+        if skip_no_peaks:
+            has_peaks, debug_info = has_substantial_peaks(x, y_smoothed, peaks_to_use, edge_trim_frac=0.1, return_debug=True)
+            if not has_peaks:
+                print(f"      ⚠️  Skipping fit: No substantial peaks detected")
+                print(f"      Debug info: {debug_info}")
+                fit_result = create_skipped_fit_result(x, y, model_kind)
+                # Create minimal result structure
+                result = {
+                    'well_name': well_name,
+                    'read': read,
+                    'data': {'x': x, 'y': y},
+                    'llm_numeric_result': llm_result,
+                    'llm_image_result': llm_image_result,
+                    'fit_result': fit_result,
+                    'files': {},
+                    'quality_assessment': {'skipped': True, 'reason': 'No substantial peaks detected'}
+                }
+                all_read_results.append(result)
+                continue  # Skip to next read
+
         # lmfit fitting with retry logic
+        # Use smoothed data for fitting to reduce noise effects
         fit_result = fit_peaks_lmfit_with_retry(
-            x, y, peaks_to_use,
+            x, y_smoothed, peaks_to_use,
             model_kind=model_kind,
             r2_target=0.92,
             max_attempts=max_attempts
         )
 
         # LLM visual assessment (create temp plot, assess, delete)
+        # Use smoothed data for assessment plots
         temp_plot_path = f'analysis_output/temp_fit_{well_name}_read{read}.png'
-        save_fitting_plot_png(x, y, fit_result, temp_plot_path,
+        save_fitting_plot_png(x, y_smoothed, fit_result, temp_plot_path,
                               title=f'Initial Fit - Well {well_name} Read {read}')
 
         llm_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, fit_result.stats.r2, well_name)
@@ -1278,10 +1797,10 @@ def run_complete_analysis(
 
             # LLM refinement based on residuals
             if fit_result.lmfit_result is not None:
-                current_residuals = y - fit_result.lmfit_result.best_fit
+                current_residuals = y_smoothed - fit_result.lmfit_result.best_fit
                 
                 # Manual boost if residuals are huge (Residual peak > 20% of data peak)
-                y_max = np.nanmax(y)
+                y_max = np.nanmax(y_smoothed)
                 res_max = np.nanmax(current_residuals)
                 
                 # Copy peaks to avoid modifying previous results
@@ -1302,7 +1821,7 @@ def run_complete_analysis(
                 
                 # Use BOOSTED peaks for LLM refinement input
                 refined_peaks = llm_refine_peaks_from_residuals(
-                    llm, x, y, boosted_peaks, current_residuals, well_name, max_peaks
+                    llm, x, y_smoothed, boosted_peaks, current_residuals, well_name, max_peaks
                 )
                 print(f"      LLM refined peaks: {len(refined_peaks.peaks)} peaks")
             else:
@@ -1310,14 +1829,14 @@ def run_complete_analysis(
 
             try:
                 alt_result = fit_peaks_lmfit_with_retry(
-                    x, y, refined_peaks,
+                    x, y_smoothed, refined_peaks,
                     model_kind=alt_model,
                     r2_target=0.92,
                     max_attempts=max_attempts
                 )
 
                 if alt_result and alt_result.stats.r2 > best_fit.stats.r2:
-                    save_fitting_plot_png(x, y, alt_result, temp_plot_path,
+                    save_fitting_plot_png(x, y_smoothed, alt_result, temp_plot_path,
                                          title=f'Alt Fit ({alt_model}) - {well_name} Read {read}')
                     alt_assessment = assess_fit_quality_with_llm(llm, temp_plot_path, alt_result.stats.r2, well_name)
 
@@ -1345,14 +1864,15 @@ def run_complete_analysis(
         fit_result = best_fit
 
         # Save final plot (only if requested)
+        # Use smoothed data for final plots (shows cleaner fit)
         if save_plots:
             if len(target_reads) > 1:
                 # Multiple reads: include read number in filename
-                fitting_plot_file = save_fitting_plot_png(x, y, fit_result, f'results/fit_results_{well_name}_read{read}.png',
+                fitting_plot_file = save_fitting_plot_png(x, y_smoothed, fit_result, f'results/fit_results_{well_name}_read{read}.png',
                                                          title=f'Peak Fitting - {well_name} Read {read}')
             else:
                 # Single read: use simple filename
-                fitting_plot_file = save_fitting_plot_png(x, y, fit_result, f'results/fit_results_{well_name}.png',
+                fitting_plot_file = save_fitting_plot_png(x, y_smoothed, fit_result, f'results/fit_results_{well_name}.png',
                                                          title=f'Peak Fitting - {well_name}')
             files_dict = {'fitting_plot': fitting_plot_file}
         else:
@@ -1362,10 +1882,11 @@ def run_complete_analysis(
         quality_assessment = assess_fitting_quality(fit_result)
 
         # Store result
+        # Store both original and smoothed data for reference
         result = {
             'well_name': well_name,
             'read': read,
-            'data': {'x': x, 'y': y},
+            'data': {'x': x, 'y': y_smoothed, 'y_original': y},  # Store smoothed as y, original as y_original
             'llm_numeric_result': llm_result,
             'llm_image_result': llm_image_result,
             'fit_result': fit_result,
@@ -1927,58 +2448,106 @@ class CurveFitting:
 
     @staticmethod
     def _slice_block(data: pd.DataFrame, start_row: int, end_row: Optional[int]) -> pd.DataFrame:
-        """Slice a data block from the raw CSV, stopping at the first empty row."""
+        """Slice a data block from the raw CSV, stopping at the first empty row.
+        
+        Expected CSV format:
+        - Row start_row: "Read N:EM Spectrum" header
+        - Next non-empty row: Column headers (either "Wavelength,A1,..." OR "Placeholder,Wavelength,A1,...")
+        - Following rows: numeric data
+        """
         end = end_row if end_row is not None else len(data)
-        block_full = data.iloc[start_row + 2 : end].copy()
+
+        # Pandas often skips blank lines; find the first non-empty row after the "Read N:" header.
+        hdr_row = start_row + 1
+        while hdr_row < end and data.iloc[hdr_row].isna().all():
+            hdr_row += 1
+        block_full = data.iloc[hdr_row:end].copy()
         
         # Find the first row that is entirely empty or NaNs
         # This stops the block before it hits summary tables at the end of the file
+        # BUT: Don't filter out the header row! Check if first row is header before filtering
         empty_rows = block_full.isnull().all(axis=1)
-        if empty_rows.any():
+        
+        # Check if first row looks like a header (contains "Placeholder" or "Wavelength")
+        first_row_check = block_full.iloc[0] if len(block_full) > 0 else None
+        is_first_row_header = False
+        if first_row_check is not None:
+            if any('PLACEHOLDER' in str(c).upper() or 'WAVELENGTH' in str(c).upper() for c in first_row_check):
+                is_first_row_header = True
+        
+        if empty_rows.any() and not is_first_row_header:
             first_empty = np.where(empty_rows)[0][0]
-            block = block_full.iloc[:first_empty].copy()
+            # Don't filter if first row is the header
+            if first_empty > 0:
+                block = block_full.iloc[:first_empty].copy()
+            else:
+                block = block_full.copy()
         else:
             block = block_full.copy()
 
-        if 0 in block.columns:
-            block = block.drop(columns=[0])
-        
         if len(block) > 0:
             # Use first row as header, but check if it looks like a header row
-            # Headers should contain text like "Wavelength" or well names like "R1", "A1", etc.
+            # Headers should contain text like "Wavelength" or well names like "A1", "R1", etc.
             first_row = block.iloc[0]
             first_row_str = [str(c).strip().upper() for c in first_row]
             
             # Check if first row looks like a header (contains "WAVELENGTH" or well name patterns)
             is_header = False
+            header_well_count = 0
             for val in first_row_str:
-                if 'WAVELENGTH' in val or 'WL' in val or re.match(r'^R\d+$', val) or re.match(r'^[A-H](?:[1-9]|1[0-2])$', val):
+                if 'WAVELENGTH' in val or 'WL' in val:
                     is_header = True
                     break
+                # Check for well name patterns (A1-E7 for 35-well, A1-H12 for 96-well, or R1-RN for acquisitions)
+                if re.match(r'^[A-H](?:[1-9]|1[0-2])$', val) or re.match(r'^R\d+$', val):
+                    header_well_count += 1
+                    is_header = True
+                    if header_well_count >= 2:
+                        break
+            
+            # Also check for "Placeholder" which indicates header
+            first_row_raw = [str(c).strip() for c in first_row]
+            if any(v.upper() == 'PLACEHOLDER' for v in first_row_raw):
+                is_header = True
+
+            # Check if first cell is "Wavelength"
+            if not is_header and len(first_row_str) > 0 and ('WAVELENGTH' in first_row_str[0] or first_row_str[0] == 'WL'):
+                is_header = True
             
             if is_header:
                 new_header = block.iloc[0]
                 block = block.iloc[1:]
-                # Convert header to strings to ensure column names are strings (not numeric)
-                block.columns = [str(c).strip() for c in new_header]
+                # Convert header to strings and preserve original well names (A1, A2, etc.)
+                header_cols = [str(c).strip() for c in new_header]
+                block.columns = header_cols
+
+                # Drop a legacy placeholder column if present (support both formats)
+                placeholder_candidates = [c for c in block.columns if str(c).strip().upper() == 'PLACEHOLDER']
+                if placeholder_candidates:
+                    block = block.drop(columns=placeholder_candidates)
+
+                # Normalize wavelength column naming
+                if 'Wavelength' not in block.columns:
+                    # try common variants
+                    for c in list(block.columns):
+                        cu = str(c).strip().upper()
+                        if cu in ('WAVELENGTH', 'WL', 'WAVELENGTH (NM)', 'WAVELENGTH_NM'):
+                            block = block.rename(columns={c: 'Wavelength'})
+                            break
             else:
-                # First row doesn't look like a header - check if it's actually numeric data
+                # First row doesn't look like a header - check if it's numeric data
                 first_row_vals = [pd.to_numeric(str(c), errors='coerce') for c in block.iloc[0]]
                 is_numeric_data = sum(1 for v in first_row_vals if pd.notna(v)) >= 2
                 
                 if is_numeric_data:
-                    # First row is data, not header - need to add header
-                    # Check if we have at least 2 columns (wavelength + at least one well)
+                    # First row is data, not header - create generic headers
                     if len(block.columns) >= 2:
-                        # Assume: col 0 = Wavelength, col 1+ = wells
-                        # Use R1, R2, etc. format for wells (matching our CSV generation)
                         well_cols = [f'R{i}' for i in range(1, len(block.columns))]
                         block.columns = ['Wavelength'] + well_cols
                     else:
-                        # Fallback: use generic names (but make them recognizable as wells)
-                        block.columns = ['Wavelength'] + [f'R{i}' for i in range(1, len(block.columns))] if len(block.columns) > 1 else ['Wavelength']
+                        block.columns = ['Wavelength'] if len(block.columns) == 1 else ['Wavelength'] + [f'R{i}' for i in range(1, len(block.columns))]
                 else:
-                    # First row might be header but didn't match our pattern - use it anyway
+                    # First row might be header but didn't match pattern - use it anyway
                     new_header = block.iloc[0]
                     block = block.iloc[1:]
                     block.columns = [str(c).strip() for c in new_header]
@@ -2167,7 +2736,9 @@ class CurveFitting:
             # Exclude wavelength-related columns
             if col_upper in ['WAVELENGTH', 'WAVELENGTH (NM)', 'WAVELENGTH_NM', 'WL']:
                 return False
-            # Include valid well names (A1-H12 pattern) OR acquisition names (R1, R2, etc.)
+            # Include valid well names (A1-H12 pattern for 96-well, A1-E7 for 35-well) OR acquisition names (R1, R2, etc.)
+            # Pattern matches: A1-A9, A10-A12, B1-B9, B10-B12, ..., H1-H9, H10-H12 (96-well)
+            # Also matches: A1-A7, B1-B7, ..., E1-E7 (35-well)
             if re.match(r'^[A-H](?:[1-9]|1[0-2])$', col_upper):
                 return True
             # Also accept R-prefixed names for acquisitions (R1, R2, R3, etc.)
@@ -2370,7 +2941,10 @@ class CurveFitting:
             if len(x_trimmed) > 1:
                 x_diff = np.diff(x_trimmed)
                 if np.any(x_diff <= 0):
-                    print(f"  Warning: Wavelength array not monotonic after trimming for {well} read {read}")
+                    # Defensive: sort by wavelength (handles stacked/duplicated segments)
+                    order = np.argsort(x_trimmed)
+                    x_trimmed = x_trimmed[order]
+                    y_trimmed = y_trimmed[order]
             
             print(f"  Trimmed data for {well} read {read}: removed {first_valid} leading and {len(y)-last_valid-1} trailing invalid points. "
                   f"Wavelength range: {x_trimmed.min():.1f}-{x_trimmed.max():.1f} nm ({len(x_trimmed)} points)")
