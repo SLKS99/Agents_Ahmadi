@@ -1414,22 +1414,43 @@ if run_button or auto_run_triggered:
                             if ml_result.get("success"):
                                 st.success(f"✅ ML Model ({selected_ml_model}) executed successfully!")
                                 
+                                # Store results in session state for Analysis Agent
+                                if selected_ml_model == "Monte Carlo Decision Tree (external)":
+                                    # Store Monte Carlo results separately
+                                    st.session_state.monte_carlo_results = ml_result
+                                    st.session_state.monte_carlo_results_available = True
+                                else:
+                                    # Store GP results (existing behavior)
+                                    st.session_state.gp_results = {
+                                        "model_type": ml_result.get("model_type", "Unknown"),
+                                        "automated": True,
+                                        "top_candidates": ml_result.get("top_candidates", []),
+                                        "predictions": ml_result.get("predictions", {}),
+                                        "uncertainty_stats": ml_result.get("uncertainty_stats", {}),
+                                    }
+                                    st.session_state.gp_results_available = True
+                                
+                                st.session_state.analysis_ready = True
+                                
                                 # Display top candidates
                                 if ml_result.get("top_candidates"):
                                     st.subheader("🤖 ML Model Recommendations")
                                     import pandas as pd
                                     candidates_df = pd.DataFrame(ml_result["top_candidates"])
                                     st.dataframe(candidates_df, width='stretch')
-                                
-                                # Save ML results to session state for Analysis Agent
-                                st.session_state.gp_results = {
-                                    "model_type": ml_result.get("model_type", "Unknown"),
-                                    "automated": True,
-                                    "top_candidates": ml_result.get("top_candidates", []),
-                                    "predictions": ml_result.get("predictions", {}),
-                                    "uncertainty_stats": ml_result.get("uncertainty_stats", {}),
-                                }
-                                st.session_state.analysis_ready = True
+                                elif ml_result.get("optimization_stats"):
+                                    # Display Monte Carlo stats
+                                    st.subheader("🤖 Monte Carlo Decision Tree Results")
+                                    stats = ml_result.get("optimization_stats", {})
+                                    col1, col2, col3, col4 = st.columns(4)
+                                    with col1:
+                                        st.metric("Total Cycles", stats.get("total_cycles", "N/A"))
+                                    with col2:
+                                        st.metric("Best Quality", f"{stats.get('best_quality', 0):.2f}")
+                                    with col3:
+                                        st.metric("Total Improvement", f"{stats.get('total_improvement_pct', 0):+.2f}%")
+                                    with col4:
+                                        st.metric("Avg Improvement/Cycle", f"{stats.get('avg_improvement_per_cycle_pct', 0):+.2f}%")
                                 
                                 # Auto-route to Analysis Agent if enabled
                                 if st.session_state.get("auto_route_to_analysis", False):

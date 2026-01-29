@@ -11,9 +11,17 @@ import tempfile
 import json
 import re
 from typing import Dict, Any, List, Optional
+from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import numpy as np
+import base64
+
+# Lazy import for requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
 
 def _sort_wells(wells: List[str]) -> List[str]:
@@ -568,6 +576,77 @@ class CurveFittingAgent(BaseAgent):
                 # Export to CSV
                 csv_filename = f"results/{base_name}_peak_fit_export.csv"
                 csv_file = export_peak_data_to_csv(all_results, csv_filename)
+                
+                # Upload CSV to Jupyter server if enabled
+                jupyter_upload_status = None
+                try:
+                    if hasattr(st, 'session_state'):
+                        jupyter_config = st.session_state.get("jupyter_config", {})
+                        upload_enabled = jupyter_config.get("upload_enabled", False)
+                        
+                        if upload_enabled:
+                            server_url = jupyter_config.get("server_url", "")
+                            token = jupyter_config.get("token", "")
+                            base_path = jupyter_config.get("notebook_path", "Automated Agent")
+                            
+                            if server_url:
+                                # Read the CSV file content
+                                csv_file_path = Path(csv_file) if isinstance(csv_file, str) else csv_file
+                                if isinstance(csv_file_path, Path) and csv_file_path.exists():
+                                    with open(csv_file_path, 'r', encoding='utf-8') as f:
+                                        csv_content = f.read()
+                                    
+                                    # Extract just the filename (without extension) for folder name
+                                    csv_filename_only = csv_file_path.name
+                                    csv_filename_base = csv_file_path.stem  # filename without extension
+                                    
+                                    # Create folder name with filename and date
+                                    from datetime import datetime
+                                    date_str = datetime.now().strftime("%Y-%m-%d")
+                                    # Clean filename for folder name (remove problematic characters)
+                                    safe_filename = re.sub(r'[<>:"/\\|?*]', '_', csv_filename_base)
+                                    folder_name = f"{safe_filename}_{date_str}"
+                                    
+                                    # Full path: base_path/folder_name/filename.csv
+                                    csv_path = f"{base_path}/{folder_name}"
+                                    
+                                    # First, create the folder if it doesn't exist
+                                    # Jupyter API: create directory by PUTting a directory type
+                                    folder_api_url = f"{server_url.rstrip('/')}/api/contents/{csv_path}"
+                                    folder_headers = {
+                                        "Authorization": f"token {token}" if token else None
+                                    }
+                                    folder_headers = {k: v for k, v in folder_headers.items() if v is not None}
+                                    
+                                    try:
+                                        # Try to create directory (idempotent - won't fail if exists)
+                                        folder_response = requests.put(
+                                            folder_api_url,
+                                            json={"type": "directory"},
+                                            headers=folder_headers,
+                                            timeout=10
+                                        )
+                                        # Directory creation is optional - continue even if it fails
+                                        if folder_response.status_code in [200, 201, 409]:  # 409 = already exists
+                                            logger.info(f"Created/verified folder: {csv_path}")
+                                    except Exception as folder_e:
+                                        logger.warning(f"Could not create folder (may already exist): {folder_e}")
+                                    
+                                    # Upload CSV file to the folder
+                                    success, message = self.upload_to_jupyter(
+                                        server_url, token, csv_content, csv_filename_only, csv_path
+                                    )
+                                    jupyter_upload_status = {"success": success, "message": message, "path": csv_path}
+                                    if success:
+                                        logger.info(f"Successfully uploaded CSV to Jupyter: {message}")
+                                        print(f"[INFO] Successfully uploaded CSV to Jupyter: {message}")
+                                    else:
+                                        logger.warning(f"Failed to upload CSV to Jupyter: {message}")
+                                        print(f"[WARNING] Failed to upload CSV to Jupyter: {message}")
+                except Exception as e:
+                    logger.warning(f"Error uploading CSV to Jupyter: {e}")
+                    print(f"[WARNING] Error uploading CSV to Jupyter: {e}")
+                    jupyter_upload_status = {"success": False, "message": str(e)}
 
                 return {
                     "success": True,
@@ -576,6 +655,7 @@ class CurveFittingAgent(BaseAgent):
                         "json_results": json_file,
                         "csv_export": csv_file
                     },
+                    "jupyter_upload": jupyter_upload_status,
                     "summary": {
                         "total_wells": len(all_results),
                         "successful_fits": len([r for r in all_results if r['fit_result'].success]),
@@ -779,3 +859,59 @@ class CurveFittingAgent(BaseAgent):
                 "well_name": well_name,
                 "read": read
             }
+    
+    def upload_to_jupyter(self, server_url, token, file_content, filename, notebook_path):
+        """Upload file to Jupyter server using Jupyter API"""
+        if requests is None:
+            return False, "requests library not available"
+        
+        try:
+            # Clean up URL
+            server_url = server_url.rstrip('/')
+            if not server_url.startswith('http'):
+                server_url = f"http://{server_url}"
+
+            # Construct API endpoint
+            api_path = f"{notebook_path}/{filename}"
+            api_url = f"{server_url}/api/contents/{api_path}"
+
+            # Prepare headers
+            headers = {
+                "Authorization": f"token {token}" if token else None
+            }
+            headers = {k: v for k, v in headers.items() if v is not None}
+
+            # Prepare file content (base64 encoded for binary, plain text for text files)
+            if filename.endswith('.csv') or filename.endswith('.py') or filename.endswith('.txt'):
+                # Text files
+                content_data = {
+                    "type": "file",
+                    "format": "text",
+                    "content": file_content
+                }
+            else:
+                # Binary files (base64 encoded)
+                content_data = {
+                    "type": "file",
+                    "format": "base64",
+                    "content": base64.b64encode(
+                        file_content.encode() if isinstance(file_content, str) else file_content).decode()
+                }
+
+            # Make PUT request to create/update file
+            response = requests.put(
+                api_url,
+                json=content_data,
+                headers=headers,
+                timeout=10
+            )
+
+            if response.status_code in [200, 201]:
+                return True, f"Successfully uploaded {filename} to {api_path}"
+            else:
+                return False, f"Failed to upload: {response.status_code} - {response.text}"
+
+        except requests.exceptions.RequestException as e:
+            return False, f"Connection error: {str(e)}"
+        except Exception as e:
+            return False, f"Error: {str(e)}"

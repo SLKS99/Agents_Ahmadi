@@ -143,6 +143,8 @@ with experiment:
     
     with col_exp1:
         st.markdown("**Jupyter Server Configuration**")
+        st.info("Configure once - used by all agents (Experiments, Curve Fitting, etc.)")
+        
         jupyter_url = st.text_input(
             "Jupyter Server URL:",
             value=st.session_state.jupyter_config["server_url"],
@@ -161,9 +163,9 @@ with experiment:
         st.session_state.jupyter_config["token"] = jupyter_token
         
         jupyter_notebook_path = st.text_input(
-            "Notebook Path/Directory:",
+            "Base Notebook Path/Directory:",
             value=st.session_state.jupyter_config.get("notebook_path", "Automated Agent"),
-            help="Directory path in Jupyter where files will be uploaded (e.g., 'Automated Agent' or 'research_notes')",
+            help="Base directory path in Jupyter (e.g., 'Automated Agent'). Curve fitting will create subfolders with filename_date",
             key="jupyter_notebook_path_input"
         )
         st.session_state.jupyter_config["notebook_path"] = jupyter_notebook_path
@@ -171,7 +173,7 @@ with experiment:
         jupyter_upload_enabled = st.checkbox(
             "Enable Auto-Upload to Jupyter",
             value=st.session_state.jupyter_config.get("upload_enabled", False),
-            help="Automatically upload generated experiment files to Jupyter server",
+            help="Automatically upload generated files to Jupyter server (applies to all agents)",
             key="jupyter_upload_enabled_input"
         )
         st.session_state.jupyter_config["upload_enabled"] = jupyter_upload_enabled

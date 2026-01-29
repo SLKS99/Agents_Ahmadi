@@ -13,6 +13,7 @@ from pathlib import Path
 # Constants matching ml_models.py
 MODEL_SINGLE_GP = "Single-objective GP (scikit-learn)"
 MODEL_DUAL_TORCH_GP = "Dual-objective GP (PyTorch)"
+MODEL_MONTE_CARLO_TREE = "Monte Carlo Decision Tree (external)"
 
 
 def find_latest_curve_fitting_results(results_dir: str = "results") -> Optional[Tuple[str, str]]:
@@ -113,6 +114,8 @@ def run_automated_ml_model(
         return _run_single_gp_automated(json_path, composition_csv, auto_config)
     elif model_choice == MODEL_DUAL_TORCH_GP:
         return _run_dual_gp_automated(csv_path, auto_config)
+    elif model_choice == MODEL_MONTE_CARLO_TREE:
+        return _run_monte_carlo_tree_automated(auto_config or {})
     else:
         return {
             "success": False,
@@ -372,6 +375,247 @@ def _run_dual_gp_automated(
             },
         }
     
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def _run_monte_carlo_tree_automated(
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Run the external Monte Carlo Decision Tree project in headless mode.
+
+    This assumes:
+      - The repo path points to the folder containing `main.py`
+      - The project manages its own data/history under its `data/` folder
+    """
+    import subprocess
+    from pathlib import Path
+
+    repo_path = config.get("repo_path")
+    if not repo_path:
+        return {
+            "success": False,
+            "error": "Monte Carlo repo path not provided in auto_config['repo_path']. "
+                     "Configure it in the ML Models page.",
+        }
+
+    repo = Path(repo_path)
+    if not repo.exists():
+        return {
+            "success": False,
+            "error": f"Monte Carlo repo path does not exist: {repo}",
+        }
+
+    n_attempts = int(config.get("n_attempts", 500))
+    with_agent = bool(config.get("with_agent", False))
+
+    # Build command
+    python_exe = os.environ.get("PYTHON_EXECUTABLE", "python")
+    cmd = [python_exe, "main.py"]
+    env = os.environ.copy()
+    env["MC_N_ATTEMPTS"] = str(n_attempts)
+    if with_agent:
+        cmd.extend(["--with-agent", "--auto-apply"])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=None,
+        )
+
+        success = result.returncode == 0
+        
+        # Parse results from stdout and output files
+        monte_carlo_results = {
+            "success": success,
+            "model_type": "MonteCarloDecisionTree",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+        }
+        
+        # Try to parse optimization stats from stdout
+        import re
+        stdout_lines = result.stdout.split('\n')
+        stats = {}
+        for line in stdout_lines:
+            if "Total Cycles:" in line:
+                match = re.search(r'Total Cycles:\s*(\d+)', line)
+                if match:
+                    stats["total_cycles"] = int(match.group(1))
+            elif "Best Quality Achieved:" in line:
+                match = re.search(r'Best Quality Achieved:\s*([\d.]+)', line)
+                if match:
+                    stats["best_quality"] = float(match.group(1))
+            elif "Total Improvement:" in line:
+                match = re.search(r'Total Improvement:\s*([+-]?[\d.]+)%', line)
+                if match:
+                    stats["total_improvement_pct"] = float(match.group(1))
+            elif "Average Improvement/Cycle:" in line:
+                match = re.search(r'Average Improvement/Cycle:\s*([+-]?[\d.]+)%', line)
+                if match:
+                    stats["avg_improvement_per_cycle_pct"] = float(match.group(1))
+        
+        if stats:
+            monte_carlo_results["optimization_stats"] = stats
+        
+        # Try to parse LLM agent restriction/constraint information from stdout
+        # Look for LLM Agent sections in stdout
+        llm_agent_results = {}
+        in_llm_section = False
+        llm_section_lines = []
+        
+        for i, line in enumerate(stdout_lines):
+            if "LLM Agent" in line or "Running LLM Agent" in line:
+                in_llm_section = True
+                llm_section_lines = []
+            elif in_llm_section:
+                if line.strip().startswith("=" * 60) or (line.strip() and not line.startswith(" ")):
+                    # End of LLM section or new major section
+                    if "RECOMMENDATION SUMMARY" in "\n".join(llm_section_lines):
+                        break
+                llm_section_lines.append(line)
+        
+        # Try to extract LLM agent information
+        if llm_section_lines:
+            llm_text = "\n".join(llm_section_lines)
+            
+            # Extract patterns (parameter restrictions/observations)
+            patterns = []
+            for line in llm_section_lines:
+                if "Found" in line and "patterns" in line.lower():
+                    match = re.search(r'Found\s+(\d+)\s+patterns?', line, re.IGNORECASE)
+                    if match:
+                        llm_agent_results["num_patterns"] = int(match.group(1))
+                elif re.match(r'\s*-\s+[A-Za-z_]+:', line):
+                    # Pattern line: "  - parameter: observation... (conf: X.XX)"
+                    pattern_match = re.match(r'\s*-\s+([A-Za-z_]+):\s*(.+?)\s*\(conf:\s*([\d.]+)\)', line)
+                    if pattern_match:
+                        patterns.append({
+                            "parameter": pattern_match.group(1),
+                            "observation": pattern_match.group(2),
+                            "confidence": float(pattern_match.group(3))
+                        })
+            
+            if patterns:
+                llm_agent_results["patterns"] = patterns
+            
+            # Extract config suggestions (parameter restrictions/changes)
+            suggestions = []
+            for line in llm_section_lines:
+                if "Generated" in line and "suggestions" in line.lower():
+                    match = re.search(r'Generated\s+(\d+)\s+suggestions?', line, re.IGNORECASE)
+                    if match:
+                        llm_agent_results["num_suggestions"] = int(match.group(1))
+                elif "->" in line and "conf:" in line:
+                    # Suggestion line: "  - parameter_path: current -> suggested (conf: X.XX)"
+                    sugg_match = re.match(r'\s*-\s+([^:]+):\s*([^\s]+)\s*->\s*([^\s]+)\s*\(conf:\s*([\d.]+)\)', line)
+                    if sugg_match:
+                        suggestions.append({
+                            "parameter_path": sugg_match.group(1).strip(),
+                            "current_value": sugg_match.group(2),
+                            "suggested_value": sugg_match.group(3),
+                            "confidence": float(sugg_match.group(4))
+                        })
+            
+            if suggestions:
+                llm_agent_results["suggestions"] = suggestions
+            
+            # Extract recommendation summary
+            summary_start = None
+            summary_end = None
+            for i, line in enumerate(llm_section_lines):
+                if "RECOMMENDATION SUMMARY" in line:
+                    summary_start = i + 1
+                elif summary_start is not None and line.strip().startswith("-" * 60):
+                    summary_end = i
+                    break
+            
+            if summary_start is not None:
+                summary_lines = llm_section_lines[summary_start:summary_end] if summary_end else llm_section_lines[summary_start:]
+                summary_text = "\n".join(summary_lines).strip()
+                if summary_text:
+                    llm_agent_results["recommendation_summary"] = summary_text
+        
+        # Also try to load LLM agent results from a JSON file if it exists
+        # (in case the Monte Carlo project saves agent results to a file)
+        llm_results_file = repo / "data" / "llm_agent_results.json"
+        if llm_results_file.exists():
+            try:
+                import json as json_lib
+                with open(llm_results_file, 'r') as f:
+                    saved_llm_results = json_lib.load(f)
+                    # Merge saved results with parsed results (saved takes precedence)
+                    if saved_llm_results:
+                        llm_agent_results.update(saved_llm_results)
+            except Exception as e:
+                monte_carlo_results["llm_agent_parse_error"] = str(e)
+        
+        if llm_agent_results:
+            monte_carlo_results["llm_agent_results"] = llm_agent_results
+        
+        # Try to load candidates_analysis.csv if it exists
+        candidates_csv = repo / "data" / "candidates_analysis.csv"
+        if candidates_csv.exists():
+            try:
+                import pandas as pd
+                candidates_df = pd.read_csv(candidates_csv)
+                if not candidates_df.empty:
+                    # Extract top candidates
+                    top_candidates = []
+                    # Look for columns that might indicate ranking/score
+                    score_cols = [c for c in candidates_df.columns if 'score' in c.lower() or 'rank' in c.lower() or 'quality' in c.lower()]
+                    if score_cols:
+                        # Sort by score if available
+                        sort_col = score_cols[0]
+                        top_df = candidates_df.nlargest(10, sort_col) if candidates_df[sort_col].dtype in ['float64', 'int64'] else candidates_df.head(10)
+                    else:
+                        top_df = candidates_df.head(10)
+                    
+                    for idx, row in top_df.iterrows():
+                        candidate_info = {
+                            "rank": idx + 1,
+                            "candidate": str(row.get("Material_Composition", f"Candidate {idx + 1}")),
+                        }
+                        # Add any numeric columns as metrics
+                        for col in candidates_df.columns:
+                            if candidates_df[col].dtype in ['float64', 'int64']:
+                                candidate_info[col] = float(row[col])
+                        top_candidates.append(candidate_info)
+                    
+                    monte_carlo_results["top_candidates"] = top_candidates
+                    monte_carlo_results["candidates_file"] = str(candidates_csv)
+            except Exception as e:
+                # If we can't parse the CSV, continue without it
+                monte_carlo_results["candidates_parse_error"] = str(e)
+        
+        # Try to load optimization_history.csv if it exists
+        history_csv = repo / "data" / "optimization_history.csv"
+        if history_csv.exists():
+            try:
+                import pandas as pd
+                history_df = pd.read_csv(history_csv)
+                if not history_df.empty:
+                    monte_carlo_results["optimization_history"] = {
+                        "total_experiments": len(history_df),
+                        "file_path": str(history_csv),
+                    }
+                    # Get latest cycle info if available
+                    if "Cycle" in history_df.columns:
+                        monte_carlo_results["optimization_history"]["latest_cycle"] = int(history_df["Cycle"].max())
+            except Exception as e:
+                monte_carlo_results["history_parse_error"] = str(e)
+        
+        return monte_carlo_results
     except Exception as e:
         import traceback
         return {

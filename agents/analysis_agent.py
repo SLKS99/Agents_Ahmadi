@@ -187,13 +187,86 @@ class AnalysisAgent(BaseAgent):
         
         return "\n".join(summary_parts)
     
+    def _summarize_monte_carlo_results(self, mc_results: Dict[str, Any]) -> str:
+        """Create a summary of Monte Carlo Decision Tree results for LLM analysis."""
+        summary_parts = []
+        
+        summary_parts.append(f"**Model Type:** Monte Carlo Decision Tree\n")
+        
+        # Optimization stats from stdout
+        stats = mc_results.get("optimization_stats", {})
+        if stats:
+            summary_parts.append(f"**Total Cycles:** {stats.get('total_cycles', 'N/A')}\n")
+            summary_parts.append(f"**Best Quality Achieved:** {stats.get('best_quality', 'N/A'):.2f}\n")
+            summary_parts.append(f"**Total Improvement:** {stats.get('total_improvement_pct', 'N/A'):+.2f}%\n")
+            summary_parts.append(f"**Average Improvement/Cycle:** {stats.get('avg_improvement_per_cycle_pct', 'N/A'):+.2f}%\n")
+        
+        # Top candidates
+        top_candidates = mc_results.get("top_candidates", [])
+        if top_candidates:
+            summary_parts.append(f"**Top Exploration Candidates:** {len(top_candidates)}\n")
+            for i, candidate in enumerate(top_candidates[:5], 1):
+                candidate_str = candidate.get("candidate", "Unknown")
+                # Add any quality/score metrics if available
+                metrics = []
+                for key, value in candidate.items():
+                    if key not in ["rank", "candidate"] and isinstance(value, (int, float)):
+                        metrics.append(f"{key}={value:.3f}")
+                metrics_str = f" ({', '.join(metrics)})" if metrics else ""
+                summary_parts.append(f"  {i}. {candidate_str}{metrics_str}\n")
+        
+        # Optimization history
+        history = mc_results.get("optimization_history", {})
+        if history:
+            summary_parts.append(f"**Optimization History:** {history.get('total_experiments', 'N/A')} experiments")
+            if history.get("latest_cycle"):
+                summary_parts.append(f" (Latest Cycle: {history['latest_cycle']})")
+            summary_parts.append("\n")
+        
+        # LLM Agent Restrictions/Constraints (if available)
+        llm_agent = mc_results.get("llm_agent_results", {})
+        if llm_agent:
+            summary_parts.append(f"**LLM Agent Analysis (Parameter Restrictions/Constraints):**\n")
+            
+            # Patterns (learned restrictions)
+            patterns = llm_agent.get("patterns", [])
+            if patterns:
+                summary_parts.append(f"**Learned Patterns ({len(patterns)}):**\n")
+                for i, pattern in enumerate(patterns[:5], 1):
+                    param = pattern.get("parameter", "Unknown")
+                    obs = pattern.get("observation", "")
+                    conf = pattern.get("confidence", 0)
+                    summary_parts.append(f"  {i}. **{param}**: {obs} (confidence: {conf:.2f})\n")
+            
+            # Config suggestions (parameter restrictions/changes)
+            suggestions = llm_agent.get("suggestions", [])
+            if suggestions:
+                summary_parts.append(f"**Parameter Restrictions/Changes Suggested ({len(suggestions)}):**\n")
+                for i, sugg in enumerate(suggestions[:5], 1):
+                    param_path = sugg.get("parameter_path", "Unknown")
+                    current = sugg.get("current_value", "?")
+                    suggested = sugg.get("suggested_value", "?")
+                    conf = sugg.get("confidence", 0)
+                    summary_parts.append(f"  {i}. **{param_path}**: {current} → {suggested} (confidence: {conf:.2f})\n")
+            
+            # Recommendation summary
+            rec_summary = llm_agent.get("recommendation_summary")
+            if rec_summary:
+                summary_parts.append(f"**LLM Agent Recommendation Summary:**\n{rec_summary}\n")
+            elif llm_agent.get("num_patterns") or llm_agent.get("num_suggestions"):
+                summary_parts.append(f"LLM agent identified {llm_agent.get('num_patterns', 0)} patterns and "
+                                   f"{llm_agent.get('num_suggestions', 0)} parameter restriction suggestions.\n")
+        
+        return "".join(summary_parts) if summary_parts else "Monte Carlo results available but no summary generated."
+    
     def _analyze_results_with_llm(
         self,
         hypothesis_context: str,
         experimental_context: str,
         curve_fitting_summary: str,
         full_results: Optional[Dict[str, Any]] = None,
-        gp_results: Optional[Dict[str, Any]] = None
+        gp_results: Optional[Dict[str, Any]] = None,
+        monte_carlo_results: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Use LLM to analyze results, relate to hypothesis/experiments,
@@ -206,6 +279,9 @@ class AnalysisAgent(BaseAgent):
         
         # Summarize GP results if available
         gp_summary = self._summarize_gp_results(gp_results) if gp_results else "Not provided"
+        
+        # Summarize Monte Carlo results if available
+        mc_summary = self._summarize_monte_carlo_results(monte_carlo_results) if monte_carlo_results else "Not provided"
         
         prompt = f"""
 {ANALYSIS_INSTRUCTIONS}
@@ -221,6 +297,9 @@ class AnalysisAgent(BaseAgent):
 
 ## ML Model Results (Gaussian Process)
 {gp_summary}
+
+## ML Model Results (Monte Carlo Decision Tree)
+{mc_summary}
 
 ## Full Results (if needed for detailed analysis)
 {json.dumps(full_results, indent=2)[:2000] if full_results else "Not provided"}
@@ -365,6 +444,9 @@ class AnalysisAgent(BaseAgent):
         curve_fitting_results = self._get_curve_fitting_results()
         gp_results = self._get_gp_results()
         
+        # Get Monte Carlo results
+        monte_carlo_results = st.session_state.get("monte_carlo_results")
+        
         # Display context
         with st.expander("📋 Context Information", expanded=False):
             col1, col2 = st.columns(2)
@@ -396,6 +478,70 @@ class AnalysisAgent(BaseAgent):
                     st.write(f"- Std: {uncertainty_stats.get('std', 0):.4f}")
                     st.write(f"- Max: {uncertainty_stats.get('max', 0):.4f}")
         
+        # Display Monte Carlo Decision Tree results if available
+        monte_carlo_results = st.session_state.get("monte_carlo_results")
+        if monte_carlo_results:
+            with st.expander("🌳 ML Model Results (Monte Carlo Decision Tree)", expanded=True):
+                stats = monte_carlo_results.get("optimization_stats", {})
+                if stats:
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Cycles", stats.get("total_cycles", "N/A"))
+                    with col2:
+                        st.metric("Best Quality", f"{stats.get('best_quality', 0):.2f}")
+                    with col3:
+                        st.metric("Total Improvement", f"{stats.get('total_improvement_pct', 0):+.2f}%")
+                    with col4:
+                        st.metric("Avg Improvement/Cycle", f"{stats.get('avg_improvement_per_cycle_pct', 0):+.2f}%")
+                
+                top_candidates = monte_carlo_results.get("top_candidates", [])
+                if top_candidates:
+                    st.markdown("**Top Exploration Candidates:**")
+                    import pandas as pd
+                    candidates_df = pd.DataFrame(top_candidates)
+                    st.dataframe(candidates_df, use_container_width=True)
+                
+                history = monte_carlo_results.get("optimization_history", {})
+                if history:
+                    st.markdown(f"**Optimization History:** {history.get('total_experiments', 'N/A')} experiments")
+                    if history.get("latest_cycle"):
+                        st.markdown(f"Latest Cycle: {history['latest_cycle']}")
+                
+                # Display LLM Agent Restrictions/Constraints
+                llm_agent = monte_carlo_results.get("llm_agent_results", {})
+                if llm_agent:
+                    st.markdown("---")
+                    st.markdown("**🤖 LLM Agent Restrictions & Constraints**")
+                    
+                    patterns = llm_agent.get("patterns", [])
+                    if patterns:
+                        st.markdown(f"**Learned Patterns ({len(patterns)}):**")
+                        for pattern in patterns[:5]:
+                            param = pattern.get("parameter", "Unknown")
+                            obs = pattern.get("observation", "")
+                            conf = pattern.get("confidence", 0)
+                            st.markdown(f"- **{param}**: {obs} _(confidence: {conf:.2f})_")
+                    
+                    suggestions = llm_agent.get("suggestions", [])
+                    if suggestions:
+                        st.markdown(f"**Parameter Restrictions Suggested ({len(suggestions)}):**")
+                        import pandas as pd
+                        sugg_df = pd.DataFrame([
+                            {
+                                "Parameter": s.get("parameter_path", "Unknown"),
+                                "Current": str(s.get("current_value", "?")),
+                                "Suggested": str(s.get("suggested_value", "?")),
+                                "Confidence": f"{s.get('confidence', 0):.2f}"
+                            }
+                            for s in suggestions[:10]
+                        ])
+                        st.dataframe(sugg_df, use_container_width=True)
+                    
+                    rec_summary = llm_agent.get("recommendation_summary")
+                    if rec_summary:
+                        with st.expander("📋 LLM Agent Recommendation Summary", expanded=False):
+                            st.markdown(rec_summary)
+        
         if not curve_fitting_results:
             st.warning("⚠️ No curve fitting results found.")
             st.info("Please run the Curve Fitting Agent first to generate results for analysis.")
@@ -425,6 +571,13 @@ class AnalysisAgent(BaseAgent):
             st.subheader("ML Model Results Summary (Gaussian Process)")
             st.markdown(gp_summary)
         
+        # Add Monte Carlo Decision Tree results if available
+        monte_carlo_results = st.session_state.get("monte_carlo_results")
+        if monte_carlo_results:
+            monte_carlo_summary = self._summarize_monte_carlo_results(monte_carlo_results)
+            st.subheader("ML Model Results Summary (Monte Carlo Decision Tree)")
+            st.markdown(monte_carlo_summary)
+        
         # Analysis button
         if st.button("🔍 Analyze Results", type="primary", use_container_width=True):
             with st.spinner("Analyzing results with LLM..."):
@@ -434,7 +587,8 @@ class AnalysisAgent(BaseAgent):
                     experimental_context,
                     curve_fitting_summary,
                     curve_fitting_results,
-                    gp_results
+                    gp_results,
+                    monte_carlo_results
                 )
                 
                 if analysis_result["success"]:

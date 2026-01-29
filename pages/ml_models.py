@@ -12,13 +12,15 @@ from sklearn.gaussian_process.kernels import RBF, Matern, WhiteKernel, ConstantK
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import cross_val_score
 import torch
+import subprocess
+from pathlib import Path
 from tools.memory import MemoryManager
 
 memory = MemoryManager()
 memory.init_session()
 
 st.set_page_config(layout="wide")
-st.title("ML Models - Gaussian Process")
+st.title("ML Models")
 st.markdown(
     "Train and compare different ML models on curve fitting results and composition data, "
     "then use them for optimization cycles (exploration/exploitation)."
@@ -30,23 +32,39 @@ st.markdown(
 
 MODEL_SINGLE_GP = "Single-objective GP (scikit-learn)"
 MODEL_DUAL_TORCH_GP = "Dual-objective GP (PyTorch)"
+MODEL_MONTE_CARLO_TREE = "Monte Carlo Decision Tree (external)"
+
+available_models = [MODEL_SINGLE_GP, MODEL_DUAL_TORCH_GP, MODEL_MONTE_CARLO_TREE]
+
+# If a workflow-specific choice exists, use it as default
+default_model = st.session_state.get("workflow_ml_model_choice")
+if default_model not in available_models:
+    default_model = st.session_state.get("optimization_model_choice", MODEL_SINGLE_GP)
+if default_model not in available_models:
+    default_model = MODEL_SINGLE_GP
+
+default_index = available_models.index(default_model)
 
 model_choice = st.selectbox(
     "Select ML method for optimization",
-    [MODEL_SINGLE_GP, MODEL_DUAL_TORCH_GP],
-    index=0,
+    available_models,
+    index=default_index,
     help=(
         "Choose which ML model to use for optimization cycles. "
         "You can add more methods here in the future."
     ),
 )
 
-# Persist choice for use by other pages/agents in the workflow
+# Persist choice for use by other pages/agents in the workflow and automation
 st.session_state.optimization_model_choice = model_choice
+
+# Basic per-model config object used by automated runs (curve_fitting.py → ml_automation.py)
+if "ml_model_config" not in st.session_state or not isinstance(st.session_state.ml_model_config, dict):
+    st.session_state.ml_model_config = {}
 
 # Show automation status
 if st.session_state.get("auto_ml_after_curve_fitting", False):
-    st.info(f"🤖 **Automation Enabled**: This model will run automatically after curve fitting completes.")
+    st.info("Automation Enabled: this model will run automatically after curve fitting completes.")
 
 class GaussianProcessModel:
     """Gaussian Process model for predicting properties from composition and curve fitting features."""
@@ -182,6 +200,105 @@ class GaussianProcessModel:
             return norm.cdf(z)
         else:
             return y_pred + beta * std
+
+
+# -------------------------------------------------------------------------
+# Monte Carlo Decision Tree integration (external project)
+# -------------------------------------------------------------------------
+
+def render_monte_carlo_tree_ui():
+    """
+    Simple integration of the external Monte Carlo Decision Tree project as an ML method.
+    
+    This does NOT re-implement the model. Instead, it allows:
+      - configuring the external repo path
+      - running `python main.py` from that repo
+      - capturing and displaying console output
+    """
+    st.subheader("Monte Carlo Decision Tree (external project)")
+    st.markdown(
+        "This option calls the external Monte Carlo Decision Tree project in "
+        "`C:\\Users\\shery\\monte carlo decision tree` to generate optimization "
+        "candidates based on your existing experiment history."
+    )
+    
+    # Configuration in session_state so automation can reuse it
+    cfg = st.session_state.get("ml_model_config", {})
+    mc_cfg = cfg.get("monte_carlo_tree", {})
+    
+    default_repo = mc_cfg.get(
+        "repo_path",
+        str(Path(__file__).resolve().parents[2] / "monte carlo decision tree")
+    )
+    
+    repo_path = st.text_input(
+        "Monte Carlo Decision Tree repo path",
+        value=default_repo,
+        help="Folder that contains `main.py` for the Monte Carlo Decision Tree project.",
+        key="mc_repo_path_input",
+    )
+    
+    n_attempts = st.number_input(
+        "Number of Monte Carlo attempts per cycle (n_attempts)",
+        min_value=10,
+        max_value=5000,
+        value=int(mc_cfg.get("n_attempts", 500)),
+        step=10,
+        key="mc_n_attempts_input",
+    )
+    
+    use_agent = st.checkbox(
+        "Run with LLM agent (`--with-agent --auto-apply`)",
+        value=bool(mc_cfg.get("with_agent", False)),
+        key="mc_with_agent_input",
+    )
+    
+    # Save config back to session so automation can use it
+    st.session_state.ml_model_config["monte_carlo_tree"] = {
+        "repo_path": repo_path,
+        "n_attempts": int(n_attempts),
+        "with_agent": use_agent,
+    }
+    
+    st.markdown("### Run Monte Carlo Decision Tree manually")
+    
+    col_btn1, col_btn2 = st.columns([1, 1])
+    with col_btn1:
+        if st.button("Run Monte Carlo Decision Tree now", key="run_mc_tree_now"):
+            run_cmd = [os.environ.get("PYTHON_EXECUTABLE", "python"), "main.py"]
+            # We pass n_attempts via environment to avoid changing the external CLI
+            env = os.environ.copy()
+            env["MC_N_ATTEMPTS"] = str(int(n_attempts))
+            if use_agent:
+                run_cmd.append("--with-agent")
+                run_cmd.append("--auto-apply")
+            
+            repo = Path(repo_path)
+            if not repo.exists():
+                st.error(f"Repository path does not exist: {repo}")
+                return
+            
+            with st.spinner("Running Monte Carlo Decision Tree..."):
+                try:
+                    result = subprocess.run(
+                        run_cmd,
+                        cwd=str(repo),
+                        capture_output=True,
+                        text=True,
+                        timeout=None,
+                    )
+                    st.subheader("Monte Carlo Decision Tree output")
+                    st.code(result.stdout or "(no stdout)", language=None)
+                    if result.stderr:
+                        st.subheader("stderr")
+                        st.code(result.stderr, language=None)
+                    if result.returncode == 0:
+                        st.success("Monte Carlo Decision Tree finished successfully.")
+                    else:
+                        st.error(f"Process exited with code {result.returncode}.")
+                except Exception as e:
+                    st.error(f"Error running Monte Carlo Decision Tree: {e}")
+
 
 
 class TorchGaussianProcess:
@@ -862,6 +979,19 @@ if model_choice == MODEL_SINGLE_GP:
 
     else:
         st.info("👆 Please upload both curve fitting results and composition data to begin.")
+
+
+# -------------------------------------------------------------------------
+# Other ML methods (render only the selected one)
+# -------------------------------------------------------------------------
+
+if model_choice == MODEL_MONTE_CARLO_TREE:
+    render_monte_carlo_tree_ui()
+    st.stop()
+
+# From here down is the Dual PyTorch GP UI; do not show it unless selected.
+if model_choice != MODEL_DUAL_TORCH_GP:
+    st.stop()
 
 
 # -------------------------------------------------------------------------

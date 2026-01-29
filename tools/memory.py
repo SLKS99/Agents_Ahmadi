@@ -50,10 +50,10 @@ class MemoryManager:
                 }
             },
             "jupyter_config": {
-                "server_url": "http://localhost:8888",
+                "server_url": "http://10.140.141.160:48888/",
                 "token": "",
                 "upload_enabled": False,
-                "notebook_path": "research_notes"
+                "notebook_path": "Automated Agent"
             },
             "prompt_session": [],
             "current_prompt_session_id": str(uuid.uuid4()),
