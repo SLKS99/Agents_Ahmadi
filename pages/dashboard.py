@@ -19,11 +19,11 @@ except ImportError:
 memory = MemoryManager()
 memory.init_session()
 
-st.title("Dashboard")
+st.title("📊 Dashboard")
 st.set_page_config(layout="wide")
 
 # System Performance Metrics
-st.markdown("#### System Performance")
+st.markdown("#### 📈 System Performance")
 cols = st.columns(5)
 
 if "metrics_prev" not in st.session_state:
@@ -96,9 +96,16 @@ st.session_state.metrics_prev["events"] = total_events
 
 st.markdown("---")
 # Agent Usage Analytics
-st.markdown("#### Agent Usage Analytics")
+st.markdown("#### 🤖 Agent Usage Analytics")
 usage = st.session_state.get("agent_usage_counts", {})
 total_agent_usage = sum(usage.values()) if usage else 0
+conversation_events = st.session_state.get("conversation_events", [])
+
+def _count_events_by_mode(mode_name: str) -> int:
+    return len([e for e in conversation_events if e.get("mode") == mode_name])
+
+def _count_events_by_type(type_name: str) -> int:
+    return len([e for e in conversation_events if e.get("type") == type_name])
 
 if total_agent_usage > 0:
     col1, col2 = st.columns([2, 1])
@@ -133,8 +140,30 @@ else:
     st.info("No agent usage data yet. Start using agents to see analytics here.")
 
 st.markdown("---")
+# Watcher Status
+st.markdown("#### 👀 Watcher Status")
+watcher_cols = st.columns(4)
+
+watcher_enabled = st.session_state.get("watcher_enabled", False)
+watcher_server_url = st.session_state.get("watcher_server_url", "Not set")
+watcher_watch_dir = st.session_state.get("watcher_watch_dir", "Not set")
+watcher_last_trigger = st.session_state.get("watcher_auto_trigger_time")
+
+watcher_cols[0].metric("Watcher Enabled", "Yes" if watcher_enabled else "No")
+watcher_cols[1].metric("Watcher Events", _count_events_by_type("watcher"))
+watcher_cols[2].metric("Watcher Server", watcher_server_url)
+watcher_cols[3].metric(
+    "Last Trigger",
+    datetime.fromtimestamp(watcher_last_trigger).strftime("%Y-%m-%d %H:%M:%S")
+    if watcher_last_trigger
+    else "N/A",
+)
+
+st.caption(f"Watch Directory: `{watcher_watch_dir}`")
+
+st.markdown("---")
 # File Uploads
-st.markdown("#### Uploaded Files")
+st.markdown("#### 📁 Uploaded Files")
 uploaded_files = st.session_state.get("uploaded_files", [])
 
 if uploaded_files:
@@ -161,7 +190,7 @@ else:
 
 st.markdown("---")
 # Agent Reports Section
-st.markdown("#### Agent Analysis Reports")
+st.markdown("#### 📄 Agent Analysis Reports")
 
 def generate_pdf_report(agent_name: str = "All Agents") -> bytes:
     """Generate a PDF report of agent outputs and interactions"""
@@ -288,7 +317,7 @@ with col2:
 
 st.markdown("---")
 # Additional Analytics
-st.markdown("#### Additional Analytics")
+st.markdown("#### 📊 Additional Analytics")
 
 col1, col2, col3 = st.columns(3)
 
@@ -312,12 +341,35 @@ with col3:
     st.metric("Routing Mode", routing_mode)
 
 st.markdown("---")
+# Workflow & Automation
+st.markdown("#### 🔁 Workflow & Automation")
+wf_cols = st.columns(4)
+
+wf_cols[0].metric("Workflow Active", "Yes" if st.session_state.get("workflow_active") else "No")
+wf_cols[1].metric("Workflow Step", st.session_state.get("workflow_step", "N/A"))
+wf_cols[2].metric("Auto-ML After Curve Fitting", "On" if st.session_state.get("auto_ml_after_curve_fitting") else "Off")
+wf_cols[3].metric("Analysis Ready", "Yes" if st.session_state.get("analysis_ready") else "No")
+
+ml_model_choice = st.session_state.get("optimization_model_choice") or "Not set"
+st.caption(f"ML Model Choice: `{ml_model_choice}`")
+
+st.markdown("---")
 # Session Statistics
-st.markdown("#### Session Statistics")
+st.markdown("#### 📌 Session Statistics")
 stat_cols = st.columns(4)
 
 stat_cols[0].metric("Total Interactions", len(st.session_state.get("conversation_events", [])))
 stat_cols[1].metric("Uploaded Files", len(uploaded_files))
 stat_cols[2].metric("Active Sessions", 1)  # Single session for now
 stat_cols[3].metric("Workflow Progress", f"{st.session_state.get('workflow_index', 0)} steps")
+
+st.markdown("---")
+# ML & Analysis Activity
+st.markdown("#### 🧠 ML & Analysis Activity")
+ml_cols = st.columns(4)
+
+ml_cols[0].metric("Curve Fitting Runs", _count_events_by_mode("curve fitting"))
+ml_cols[1].metric("ML Models Runs", _count_events_by_mode("ml_models"))
+ml_cols[2].metric("Analysis Runs", _count_events_by_mode("analysis"))
+ml_cols[3].metric("ML Auto Runs", _count_events_by_type("ml_automation"))
 

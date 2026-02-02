@@ -412,9 +412,7 @@ class AnalysisAgent(BaseAgent):
         if not st.session_state.get("api_key"):
             st.warning("Please enter your API key in Settings before continuing.")
             st.stop()
-        
-        st.title("Analysis Agent")
-        st.markdown("Analyzing curve fitting results in relation to hypothesis and experimental data.")
+
         
         # Research Goal Input
         st.subheader("🎯 Research Goal")

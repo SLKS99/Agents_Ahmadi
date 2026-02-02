@@ -115,17 +115,17 @@ Return ONLY the exact name of the chosen agent from the list above, with no expl
         """
         if not STREAMLIT_AVAILABLE:
             # In headless mode, use default workflow
-            workflow = ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "Analysis Agent"]
+            workflow = ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "ML Models", "Analysis Agent"]
             index = 0
         else:
             try:
                 workflow = st.session_state.get(
                     "manual_workflow",
-                    ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "Analysis Agent"],
+                    ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "ML Models", "Analysis Agent"],
                 )
                 index = st.session_state.get("workflow_index", 0)
             except (RuntimeError, AttributeError):
-                workflow = ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "Analysis Agent"]
+                workflow = ["Hypothesis Agent", "Experiment Agent", "Curve Fitting", "ML Models", "Analysis Agent"]
                 index = 0
 
         if not workflow or index >= len(workflow):

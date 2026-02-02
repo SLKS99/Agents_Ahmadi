@@ -14,7 +14,7 @@ def clear_conversation():
 def stop_and_create_hypothesis():
     st.session_state.stop_hypothesis = True
     st.session_state.stage = "hypothesis"
-    st.toast("🧠 Generating hypothesis...")
+    st.toast("Generating hypothesis...")
     st.rerun()
 
 def go_back_stage():
@@ -26,7 +26,7 @@ def go_back_stage():
         st.warning("No previous stage to go back to.")
 
 st.set_page_config(layout="centered")
-st.title("AI Hypothesis Agent")
+st.title("🧠 AI Hypothesis Agent")
 
 # Add custom CSS for better visual distinction between chat sections
 st.markdown("""

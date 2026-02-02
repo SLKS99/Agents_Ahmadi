@@ -12,6 +12,7 @@ except (ImportError, RuntimeError):
     STREAMLIT_AVAILABLE = False
     st = None
 import json
+import logging
 
 class MemoryManager:
     def __init__(self):

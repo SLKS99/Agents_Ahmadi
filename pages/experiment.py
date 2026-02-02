@@ -6,7 +6,7 @@ memory = MemoryManager()
 memory.init_session()
 
 st.set_page_config(layout="centered")
-st.title("Experiment Agent")
+st.title("🧪 Experiment Agent")
 
 # Optional manual trigger for the Experiment Agent
 st.markdown("Use the controls below to configure experimental constraints or trigger the agent directly.")
@@ -29,7 +29,7 @@ def _run_experiment_agent() -> None:
     agent.run_agent(memory)
 
 # Manual Input Section for LLM Generation Components
-with st.expander("Manual Input (Optional - Use if no hypothesis available)", expanded=False):
+with st.expander("📝 Manual Input (Optional - Use if no hypothesis available)", expanded=False):
     st.markdown("**Provide the following components manually to generate experimental plans without a hypothesis:**")
     
     manual_clarified_question = st.text_area(
@@ -82,7 +82,7 @@ with st.expander("Manual Input (Optional - Use if no hypothesis available)", exp
         st.rerun()
 
 # Experimental Parameters and Constraints Section (without form to avoid errors)
-with st.expander("Experimental Parameters and Constraints", expanded=False):
+with st.expander("⚙️ Experimental Parameters and Constraints", expanded=False):
     # Techniques
     techniques = st.multiselect(
         "Experimental Techniques:",

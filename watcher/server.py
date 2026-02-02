@@ -179,6 +179,7 @@ class Watcher(FileSystemEventHandler):
         from agents.experiment_agent import ExperimentAgent
         from agents.curve_fitting_agent import CurveFittingAgent
         from agents.analysis_agent import AnalysisAgent
+        from agents.ml_models_agent import MLModelsAgent
         from agents.watcher_agent import WatcherAgent
         from agents.fallback_agent import FallbackAgent
 
@@ -187,10 +188,11 @@ class Watcher(FileSystemEventHandler):
         exp = ExperimentAgent(name="Experiment Agent", desc="Background", params_const={})
         cf = CurveFittingAgent(name="Curve Fitting", desc="Background")
         analysis = AnalysisAgent(name="Analysis Agent", desc="Background")
+        ml_models = MLModelsAgent(name="ML Models", desc="Background")
         fb = FallbackAgent(name="Fallback Agent", desc="Handles failures")
 
         return AgentRouter(
-            agents=[WatcherAgent(), hyp, exp, cf, analysis],
+            agents=[WatcherAgent(), hyp, exp, cf, ml_models, analysis],
             fallback_agent=fb,
         )
 
@@ -806,6 +808,7 @@ def _route_event_task(payload: Dict[str, Any]):
             from agents.experiment_agent import ExperimentAgent
             from agents.curve_fitting_agent import CurveFittingAgent
             from agents.analysis_agent import AnalysisAgent
+            from agents.ml_models_agent import MLModelsAgent
             from agents.watcher_agent import WatcherAgent
             from agents.fallback_agent import FallbackAgent
 
@@ -813,9 +816,10 @@ def _route_event_task(payload: Dict[str, Any]):
             exp = ExperimentAgent(name="Experiment Agent", desc="Background", params_const={})
             cf = CurveFittingAgent(name="Curve Fitting", desc="Background")
             analysis = AnalysisAgent(name="Analysis Agent", desc="Background")
+            ml_models = MLModelsAgent(name="ML Models", desc="Background")
             fb = FallbackAgent(name="Fallback Agent", desc="Handles failures")
             router = AgentRouter(
-                agents=[WatcherAgent(), hyp, exp, cf, analysis],
+                agents=[WatcherAgent(), hyp, exp, cf, ml_models, analysis],
                 fallback_agent=fb,
             )
         router.route(payload, memory)

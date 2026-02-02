@@ -6,7 +6,7 @@ memory = MemoryManager()
 memory.init_session()
 
 st.set_page_config(layout="wide")
-st.title("Analysis Agent")
+st.title("🔎 Analysis Agent")
 st.markdown("Analyze curve fitting results in relation to your hypothesis and experimental data.")
 
 # Initialize analysis agent

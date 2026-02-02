@@ -6,39 +6,29 @@ from tools.memory import MemoryManager
 memory = MemoryManager()
 memory.init_session()
 
-def safe_json_dumps(obj, indent=2):
-    """Safely serialize JSON, handling circular references and complex objects"""
-    def make_serializable(o, visited=None):
-        """Recursively convert object to JSON-serializable format"""
-        if visited is None:
-            visited = set()
-        
-        obj_id = id(o)
-        if obj_id in visited:
-            return "<circular reference>"
-        
-        visited.add(obj_id)
-        
-        try:
-            if isinstance(o, dict):
-                return {k: make_serializable(v, visited) for k, v in o.items()}
-            elif isinstance(o, (list, tuple)):
-                return [make_serializable(item, visited) for item in o]
-            elif isinstance(o, (str, int, float, bool, type(None))):
-                return o
-            else:
-                # For other types, try to convert to string
-                return str(o)
-        except Exception:
-            return f"<non-serializable: {type(o).__name__}>"
-        finally:
-            visited.discard(obj_id)
-    
-    try:
-        serializable_obj = make_serializable(obj)
-        return json.dumps(serializable_obj, indent=indent, default=str)
-    except Exception as e:
-        return json.dumps({"error": f"Failed to serialize: {str(e)}"}, indent=indent)
+def _safe_serialize(obj, seen=None):
+    """Safely serialize objects that may contain circular references."""
+    if seen is None:
+        seen = set()
+
+    obj_id = id(obj)
+    if obj_id in seen:
+        return "<circular_ref>"
+
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+
+    seen.add(obj_id)
+
+    if isinstance(obj, dict):
+        return {str(k): _safe_serialize(v, seen) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_safe_serialize(v, seen) for v in obj]
+
+    return str(obj)
+
+def _safe_json_dumps(obj):
+    return json.dumps(_safe_serialize(obj), indent=2)
 
 def export_message_history(events=None):
     """Export conversation events as JSON or text"""
@@ -48,11 +38,11 @@ def export_message_history(events=None):
     if not events:
         return "[]", "No conversation history available."
 
-    json_data = safe_json_dumps(events, indent=2)
+    json_data = _safe_json_dumps(events)
     text_data = "\n\n".join([
         f"[{event.get('timestamp', 'N/A')}] {event.get('type', 'unknown').upper()}\n"
         f"Mode: {event.get('mode', 'unknown')}\n"
-        f"Payload: {safe_json_dumps(event.get('payload', {}), indent=2)}"
+        f"Payload: {_safe_json_dumps(event.get('payload', {}))}"
         for event in events
     ])
 
@@ -94,7 +84,7 @@ def format_experiment_event(event):
         return format_interaction_text(event)
 
 st.set_page_config(layout="wide")
-st.title("Interaction History")
+st.title("📜 Interaction History")
 
 # Get all events
 all_events = st.session_state.get("conversation_events", [])
@@ -131,7 +121,7 @@ tabs = st.tabs(tab_names)
 
 # All Interactions tab
 with tabs[0]:
-    st.subheader("All Interactions")
+    st.subheader("🧾 All Interactions")
     
     if not all_events:
         st.info("No conversation history available yet.")
@@ -154,7 +144,11 @@ with tabs[0]:
                     if payload.get("hypothesis"):
                         text_lines.append(f"  Hypothesis: {payload['hypothesis'][:200]}...")
                 else:
-                    text_lines.append(f"[{event.get('timestamp', 'N/A')}] {event.get('type', 'unknown').upper()}: {safe_json_dumps(event.get('payload', {}), indent=2)}")
+                    text_lines.append(
+                        f"[{event.get('timestamp', 'N/A')}] "
+                        f"{event.get('type', 'unknown').upper()}: "
+                        f"{_safe_json_dumps(event.get('payload', {}))}"
+                    )
             
             st.text("\n".join(text_lines))
 
@@ -162,7 +156,7 @@ with tabs[0]:
 for i, tab_name in enumerate(tab_names[1:], 1):
     mode_key = tab_name.lower()
     with tabs[i]:
-        st.subheader(f"{tab_name} Agent Interactions")
+        st.subheader(f"🧾 {tab_name} Agent Interactions")
         
         mode_events = agent_modes.get(mode_key, [])
         
@@ -193,13 +187,17 @@ for i, tab_name in enumerate(tab_names[1:], 1):
                         if payload.get("experimental_plan"):
                             text_lines.append(f"  Experimental Plan: {payload['experimental_plan'][:500]}...")
                     else:
-                        text_lines.append(f"[{event.get('timestamp', 'N/A')}] {event.get('type', 'unknown').upper()}: {safe_json_dumps(event.get('payload', {}), indent=2)}")
+                        text_lines.append(
+                            f"[{event.get('timestamp', 'N/A')}] "
+                            f"{event.get('type', 'unknown').upper()}: "
+                            f"{_safe_json_dumps(event.get('payload', {}))}"
+                        )
                 
                 st.text("\n".join(text_lines))
 
 # Export section
 st.divider()
-with st.expander("Export Data", expanded=False):
+with st.expander("📤 Export Data", expanded=False):
     col1, col2 = st.columns(2)
 
     with col1:

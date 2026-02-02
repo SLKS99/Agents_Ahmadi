@@ -20,7 +20,7 @@ memory = MemoryManager()
 memory.init_session()
 
 st.set_page_config(layout="wide")
-st.title("ML Models")
+st.title("🤖 ML Models")
 st.markdown(
     "Train and compare different ML models on curve fitting results and composition data, "
     "then use them for optimization cycles (exploration/exploitation)."
@@ -215,7 +215,7 @@ def render_monte_carlo_tree_ui():
       - running `python main.py` from that repo
       - capturing and displaying console output
     """
-    st.subheader("Monte Carlo Decision Tree (external project)")
+    st.subheader("🌲 Monte Carlo Decision Tree (external project)")
     st.markdown(
         "This option calls the external Monte Carlo Decision Tree project in "
         "`C:\\Users\\shery\\monte carlo decision tree` to generate optimization "
@@ -287,10 +287,10 @@ def render_monte_carlo_tree_ui():
                         text=True,
                         timeout=None,
                     )
-                    st.subheader("Monte Carlo Decision Tree output")
+                    st.subheader("📄 Monte Carlo Decision Tree output")
                     st.code(result.stdout or "(no stdout)", language=None)
                     if result.stderr:
-                        st.subheader("stderr")
+                        st.subheader("⚠️ stderr")
                         st.code(result.stderr, language=None)
                     if result.returncode == 0:
                         st.success("Monte Carlo Decision Tree finished successfully.")
@@ -613,12 +613,12 @@ if model_choice == MODEL_SINGLE_GP:
     # ---------------------------------------------------------------------
     # Single-objective GP (scikit-learn) using JSON + composition CSV
     # ---------------------------------------------------------------------
-    st.header("Data Input")
+    st.header("📥 Data Input")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Curve Fitting Results")
+        st.subheader("📄 Curve Fitting Results")
         curve_fitting_file = st.file_uploader(
             "Upload curve fitting results JSON file:",
             type=["json"],
@@ -642,13 +642,27 @@ if model_choice == MODEL_SINGLE_GP:
                         curve_fitting_file = os.path.join(results_dir, selected_file)
 
     with col2:
-        st.subheader("Composition Data")
+        st.subheader("🧪 Composition Data")
         composition_file = st.file_uploader(
             "Upload composition CSV file:",
             type=["csv"],
             help="CSV file with materials as rows and wells as columns",
             key="single_gp_comp_csv",
         )
+
+    # Auto-load files from workflow/automation if available
+    auto_files = st.session_state.get("workflow_curve_fitting_files", {})
+    auto_results_json = auto_files.get("results_json") or st.session_state.get("ml_auto_json_path")
+    auto_results_csv = auto_files.get("results_csv") or st.session_state.get("ml_auto_csv_path")
+    auto_composition_csv = auto_files.get("composition_csv") or st.session_state.get("ml_auto_composition_path")
+
+    if not curve_fitting_file and auto_results_json and os.path.exists(auto_results_json):
+        curve_fitting_file = auto_results_json
+        st.info(f"Using workflow curve fitting results: `{Path(auto_results_json).name}`")
+
+    if not composition_file and auto_composition_csv and os.path.exists(auto_composition_csv):
+        composition_file = auto_composition_csv
+        st.info(f"Using workflow composition file: `{Path(auto_composition_csv).name}`")
 
     # Load data
     results_data = None
@@ -660,7 +674,7 @@ if model_choice == MODEL_SINGLE_GP:
                 results_data = load_curve_fitting_results(curve_fitting_file)
             else:
                 results_data = json.load(curve_fitting_file)
-            st.success(f"✅ Loaded curve fitting results: {len(results_data.get('wells', {}))} wells")
+            st.success(f"Loaded curve fitting results: {len(results_data.get('wells', {}))} wells")
         except Exception as e:
             st.error(f"Error loading curve fitting results: {e}")
 
@@ -671,7 +685,7 @@ if model_choice == MODEL_SINGLE_GP:
             else:
                 composition_data = load_composition_data(composition_file)
             st.success(
-                f"✅ Loaded composition data: {len(composition_data.columns)} wells, "
+                f"Loaded composition data: {len(composition_data.columns)} wells, "
                 f"{len(composition_data.index)} materials"
             )
         except Exception as e:
@@ -679,20 +693,20 @@ if model_choice == MODEL_SINGLE_GP:
 
     # Extract features
     if results_data and composition_data is not None:
-        st.header("Feature Extraction")
+        st.header("🧮 Feature Extraction")
 
         try:
             X_df, y_series = extract_features_from_results(results_data, composition_data)
 
-            st.subheader("Extracted Features")
+            st.subheader("🧮 Extracted Features")
             st.dataframe(X_df.head(), use_container_width=True)
 
-            st.subheader("Target Variable")
+            st.subheader("🎯 Target Variable")
             st.write(f"Target: {y_series.name}")
             st.write(f"Mean: {y_series.mean():.4f}, Std: {y_series.std():.4f}")
 
             # Model configuration
-            st.header("Model Configuration")
+            st.header("⚙️ Model Configuration")
 
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -717,7 +731,7 @@ if model_choice == MODEL_SINGLE_GP:
             X = X_df[feature_cols].values
             y = y_series.values
 
-            if st.button("🚀 Train GP Model", type="primary", use_container_width=True, key="single_gp_train"):
+            if st.button("Train GP Model", type="primary", use_container_width=True, key="single_gp_train"):
                 with st.spinner("Training Gaussian Process model..."):
                     # Train model
                     gp_model = GaussianProcessModel(kernel_type=kernel_type, alpha=alpha)
@@ -728,7 +742,7 @@ if model_choice == MODEL_SINGLE_GP:
                     y_scaled = gp_model.scaler_y.transform(y.reshape(-1, 1)).ravel()
                     cv_scores = cross_val_score(gp_model.gp, X_scaled, y_scaled, cv=5, scoring="r2")
 
-                    st.success("✅ Model trained successfully!")
+                    st.success("Model trained successfully!")
 
                     # Display metrics
                     col1, col2, col3 = st.columns(3)
@@ -743,7 +757,7 @@ if model_choice == MODEL_SINGLE_GP:
                     y_pred, y_std = gp_model.predict(X, return_std=True)
 
                     # Visualization
-                    st.header("Model Performance")
+                    st.header("📊 Model Performance")
 
                     fig = make_subplots(
                         rows=1,
@@ -806,7 +820,7 @@ if model_choice == MODEL_SINGLE_GP:
                     st.plotly_chart(fig, use_container_width=True)
 
                     # Exploration
-                    st.header("Exploration & Next Experiments")
+                    st.header("🧭 Exploration & Next Experiments")
 
                     col1, col2 = st.columns(2)
                     with col1:
@@ -828,7 +842,7 @@ if model_choice == MODEL_SINGLE_GP:
                     )
 
                     if st.button(
-                        "🔍 Generate Exploration Candidates",
+                        "Generate Exploration Candidates",
                         use_container_width=True,
                         key="single_gp_generate_candidates",
                     ):
@@ -850,7 +864,7 @@ if model_choice == MODEL_SINGLE_GP:
                             # Sort by acquisition value
                             top_indices = np.argsort(acquisition_values)[::-1][:10]  # Top 10
 
-                            st.subheader("Top Exploration Candidates")
+                            st.subheader("🏁 Top Exploration Candidates")
 
                             results_list = []
                             for idx in top_indices:
@@ -933,7 +947,7 @@ if model_choice == MODEL_SINGLE_GP:
                             st.session_state.gp_results = gp_results
                             st.session_state.analysis_ready = True
 
-                            st.success("✅ Exploration candidates generated! Results saved for Analysis Agent.")
+                            st.success("Exploration candidates generated! Results saved for Analysis Agent.")
                             
                             # Check if Analysis Agent is next in workflow and marked as automatic
                             workflow_auto_flags = st.session_state.get("workflow_auto_flags", {})
@@ -948,14 +962,14 @@ if model_choice == MODEL_SINGLE_GP:
                             
                             # Auto-route if workflow says so
                             if analysis_auto_from_workflow:
-                                st.info("🔄 Auto-routing to Analysis Agent (workflow automation)...")
+                                st.info("Auto-routing to Analysis Agent (workflow automation)...")
                                 st.session_state.next_agent = "analysis"
                                 st.session_state.gp_results_available = True
                                 st.rerun()
 
                             # Button to send to analysis agent
                             if st.button(
-                                "📊 Send to Analysis Agent",
+                                "Send to Analysis Agent",
                                 use_container_width=True,
                                 key="single_gp_send_analysis",
                             ):
@@ -978,7 +992,7 @@ if model_choice == MODEL_SINGLE_GP:
             st.exception(e)
 
     else:
-        st.info("👆 Please upload both curve fitting results and composition data to begin.")
+        st.info("Please upload both curve fitting results and composition data to begin.")
 
 
 # -------------------------------------------------------------------------
@@ -999,7 +1013,7 @@ if model_choice != MODEL_DUAL_TORCH_GP:
 # -------------------------------------------------------------------------
 
 st.markdown("---")
-st.header("PyTorch Dual Gaussian Process (from Peak CSV)")
+st.header("🔬 PyTorch Dual Gaussian Process (from Peak CSV)")
 st.markdown(
     "This section trains **two PyTorch Gaussian Processes**: one for a performance "
     "metric (e.g., R² or PL intensity) and one for a **stability score**. "
@@ -1013,6 +1027,13 @@ dual_gp_csv_file = st.file_uploader(
     key="dual_gp_csv",
 )
 
+if dual_gp_csv_file is None:
+    auto_files = st.session_state.get("workflow_curve_fitting_files", {})
+    auto_results_csv = auto_files.get("results_csv") or st.session_state.get("ml_auto_csv_path")
+    if auto_results_csv and os.path.exists(auto_results_csv):
+        dual_gp_csv_file = auto_results_csv
+        st.info(f"Using workflow peak CSV: `{Path(auto_results_csv).name}`")
+
 if dual_gp_csv_file is not None:
     try:
         df_dual = pd.read_csv(dual_gp_csv_file)
@@ -1021,7 +1042,7 @@ if dual_gp_csv_file is not None:
         df_dual = None
 
     if df_dual is not None and not df_dual.empty:
-        st.subheader("Preview of Dual GP Data")
+        st.subheader("👀 Preview of Dual GP Data")
         st.dataframe(df_dual.head(), use_container_width=True)
 
         numeric_cols = df_dual.select_dtypes(include=[np.number]).columns.tolist()
@@ -1046,7 +1067,7 @@ if dual_gp_csv_file is not None:
                 numeric_cols[1] if len(numeric_cols) > 1 else numeric_cols[0]
             )
 
-            st.subheader("Select Targets and Features")
+            st.subheader("🎯 Select Targets and Features")
             
             # Option to compute instability score
             compute_instability = False
@@ -1067,7 +1088,7 @@ if dual_gp_csv_file is not None:
                 )
             with col_t2:
                 if compute_instability:
-                    st.info("📊 Instability score will be computed automatically")
+                    st.info("Instability score will be computed automatically")
                     stab_col = None  # Will be computed
                 else:
                     stab_col = st.selectbox(
@@ -1089,7 +1110,7 @@ if dual_gp_csv_file is not None:
                 # Configuration for instability score (if computing it)
                 instability_params = {}
                 if compute_instability:
-                    st.subheader("Instability Score Configuration")
+                    st.subheader("⚠️ Instability Score Configuration")
                     col_inst1, col_inst2 = st.columns(2)
                     with col_inst1:
                         instability_params['target_wavelength'] = st.number_input(
@@ -1172,11 +1193,11 @@ if dual_gp_csv_file is not None:
                     df_dual['computed_instability_score'] = y_stab
                     df_dual['computed_instability_score_raw'] = y_stab_raw
                     stab_col = 'computed_instability_score'
-                    st.info(f"📊 Instability scores computed and normalized (raw: [{y_stab_raw.min():.4f}, {y_stab_raw.max():.4f}], normalized: [{y_stab.min():.4f}, {y_stab.max():.4f}])")
+                    st.info(f"Instability scores computed and normalized (raw: [{y_stab_raw.min():.4f}, {y_stab_raw.max():.4f}], normalized: [{y_stab.min():.4f}, {y_stab.max():.4f}])")
                 else:
                     y_stab = df_dual[stab_col].values.astype(np.float32)
 
-                st.subheader("Dual GP Configuration")
+                st.subheader("⚙️ Dual GP Configuration")
                 col_cfg1, col_cfg2 = st.columns(2)
                 with col_cfg1:
                     noise_level = st.number_input(
@@ -1220,7 +1241,7 @@ if dual_gp_csv_file is not None:
                         help="If checked, uses acq * adjust_tune_score (matching notebook). Otherwise uses additive adjustment.",
                     )
 
-                if st.button("🚀 Train Dual PyTorch GP and Score Acquisition", use_container_width=True):
+                if st.button("Train Dual PyTorch GP and Score Acquisition", use_container_width=True):
                     with st.spinner("Training dual Gaussian Processes with PyTorch..."):
                         try:
                             # Train performance GP
@@ -1280,9 +1301,9 @@ if dual_gp_csv_file is not None:
                                 by="acquisition_score", ascending=False
                             ).reset_index(drop=True)
 
-                            st.success("✅ Dual GP trained and acquisition scores computed.")
+                            st.success("Dual GP trained and acquisition scores computed.")
 
-                            st.subheader("Top Recommended Conditions (by acquisition score)")
+                            st.subheader("✅ Top Recommended Conditions (by acquisition score)")
                             top_n = min(10, len(df_ranked))
                             
                             # Display key columns for top candidates
@@ -1292,7 +1313,7 @@ if dual_gp_csv_file is not None:
                             st.dataframe(df_ranked[display_cols].head(top_n), use_container_width=True)
                             
                             # Show full dataframe in expander
-                            with st.expander("View Full Results DataFrame"):
+                            with st.expander("📄 View Full Results DataFrame"):
                                 st.dataframe(df_ranked, use_container_width=True)
 
                             # Simple summary metrics
@@ -1345,7 +1366,7 @@ if dual_gp_csv_file is not None:
                             
                             # Auto-route if workflow says so
                             if analysis_auto_from_workflow:
-                                st.info("🔄 Auto-routing to Analysis Agent (workflow automation)...")
+                                st.info("Auto-routing to Analysis Agent (workflow automation)...")
                                 st.session_state.next_agent = "analysis"
                                 st.session_state.gp_results_available = True
                                 st.rerun()
@@ -1355,7 +1376,7 @@ if dual_gp_csv_file is not None:
                             )
 
                             if st.button(
-                                "📊 Send Dual GP Results to Analysis Agent",
+                                "Send Dual GP Results to Analysis Agent",
                                 use_container_width=True,
                             ):
                                 st.session_state.next_agent = "analysis"
@@ -1367,3 +1388,12 @@ if dual_gp_csv_file is not None:
                             import traceback
 
                             st.exception(e)
+
+# Workflow: route to Analysis once results are ready
+if (
+    st.session_state.get("workflow_active")
+    and st.session_state.get("workflow_step") == "ml_models"
+    and st.session_state.get("analysis_ready")
+):
+    st.session_state.workflow_step = "analysis"
+    st.switch_page("pages/analysis.py")

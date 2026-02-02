@@ -1,10 +1,12 @@
 import os
+import shutil
 import tempfile
 import json
 import re
 import time
 from io import BytesIO
 from pathlib import Path
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -59,9 +61,8 @@ if trigger_info_file.exists():
             
             # Show banner
             st.success(
-                f"🔄 **Auto-triggered by Watcher!** File detected: `{Path(triggered_file).name}`\n"
-                f"📅 {timestamp}",
-                icon="🤖"
+                f"**Auto-triggered by Watcher!** File detected: `{Path(triggered_file).name}`\n"
+                f"{timestamp}"
             )
             
             # Check if results already exist (from previous headless run)
@@ -75,7 +76,7 @@ if trigger_info_file.exists():
                     result_age = time.time() - latest_result.stat().st_mtime
                     if result_age < 300:  # Results from last 5 minutes
                         results_exist = True
-                        st.info(f"✅ **Results found from previous run:** `{latest_result.name}`")
+                        st.info(f"**Results found from previous run:** `{latest_result.name}`")
                         try:
                             with open(latest_result, 'r') as f:
                                 result_data = json.load(f)
@@ -86,7 +87,7 @@ if trigger_info_file.exists():
             
             # If no results exist, automatically run curve fitting in Streamlit context
             if not results_exist:
-                st.info("🚀 **Running curve fitting with UI support...**")
+                st.info("Running curve fitting with UI support...")
                 
                 # Prepare file path for curve fitting
                 data_path = Path(triggered_file)
@@ -150,7 +151,7 @@ if trigger_info_file.exists():
         # Silently handle errors reading trigger info
         pass
 
-st.title("Curve Fitting")
+st.title("📈 Curve Fitting")
 st.markdown("Upload CSV files, adjust parameters, and generate fitted curves with interactive visualizations.")
 
 # Check for automatic ML execution setting
@@ -164,7 +165,7 @@ if st.button("Clear Cache and Restart Program"):
     st.rerun()
 
 # Workflow automation settings
-with st.expander("⚙️ Workflow Automation Settings", expanded=False):
+with st.expander("🔁 Workflow Automation Settings", expanded=False):
     col_auto1, col_auto2 = st.columns(2)
     with col_auto1:
         auto_ml_enabled = st.checkbox(
@@ -186,13 +187,13 @@ with st.expander("⚙️ Workflow Automation Settings", expanded=False):
     
     if auto_ml_enabled:
         selected_model = st.session_state.get("optimization_model_choice", "No model selected")
-        st.info(f"📊 Selected ML Model: **{selected_model}**")
+        st.info(f"Selected ML Model: **{selected_model}**")
         if selected_model == "No model selected":
-            st.warning("⚠️ Please select an ML model on the ML Models page first.")
+            st.warning("Please select an ML model on the ML Models page first.")
 
 workflow_outputs = st.session_state.get("workflow_experiment_outputs")
 if workflow_outputs:
-    with st.expander("Workflow Context (Experiment Outputs)", expanded=False):
+    with st.expander("🧩 Workflow Context (Experiment Outputs)", expanded=False):
         plan = workflow_outputs.get("plan") or ""
         worklist = workflow_outputs.get("worklist") or ""
         layout = workflow_outputs.get("layout") or ""
@@ -702,7 +703,7 @@ def render_well_plate(format_name):
         rows = ['A', 'B', 'C', 'D', 'E']
         cols = list(range(1, 8))
     else:  # Insitu Well (Acquisitions) - no well selector needed
-        st.info("💡 Insitu Well format: Each column represents a separate acquisition/read (R1, R2, R3, etc.)")
+        st.info("Insitu Well format: Each column represents a separate acquisition/read (R1, R2, R3, etc.)")
         return  # Don't render well selector for acquisition format
 
     # CSS for smaller circular buttons with tighter spacing
@@ -791,7 +792,7 @@ with col1:
     if data_file:
         st.session_state.cf_data_file = data_file
         file_type = "Excel" if data_file.name.lower().endswith(('.xlsx', '.xls')) else "CSV"
-        st.success(f"✅ Data file uploaded: {data_file.name} ({file_type})")
+        st.success(f"Data file uploaded: {data_file.name} ({file_type})")
 
 with col2:
     composition_file = st.file_uploader(
@@ -802,14 +803,14 @@ with col2:
     )
     if composition_file:
         st.session_state.cf_composition_file = composition_file
-        st.success(f"✅ Composition file uploaded: {composition_file.name}")
+        st.success(f"Composition file uploaded: {composition_file.name}")
     else:
         # Show info about default file
         default_comp_path = Path(__file__).parent.parent / "data" / "2D-3D.csv"
         if default_comp_path.exists():
-            st.info(f"💡 Default composition file will be used: `{default_comp_path.name}`")
+            st.info(f"Default composition file will be used: `{default_comp_path.name}`")
         else:
-            st.warning(f"⚠️ Default composition file not found at: `{default_comp_path}`")
+            st.warning(f"Default composition file not found at: `{default_comp_path}`")
 
 # Use stored files if available
 data_file = st.session_state.cf_data_file
@@ -817,16 +818,16 @@ composition_file = st.session_state.cf_composition_file
 
 # Show current file status
 if data_file or composition_file:
-    st.subheader("📋 Current Files")
+    st.subheader("📄 Current Files")
     col1, col2 = st.columns(2)
     with col1:
         if data_file:
-            st.info(f"📊 Data: {data_file.name}")
+            st.info(f"Data: {data_file.name}")
         else:
             st.warning("❌ No data file uploaded")
     with col2:
         if composition_file:
-            st.info(f"🧪 Composition: {composition_file.name}")
+            st.info(f"Composition: {composition_file.name}")
         else:
             st.warning("❌ No composition file uploaded")
 
@@ -874,7 +875,7 @@ with col2:
     # Read selection with multiple options
     st.markdown("**Read Selection**")
     read_type_desc = "EM Spectrum" if "PL" in read_type else "Absorbance"
-    st.caption(f"💡 Note: Only {read_type_desc} reads will be analyzed. Other read types are automatically excluded.")
+    st.caption(f"Note: Only {read_type_desc} reads will be analyzed. Other read types are automatically excluded.")
 
     read_mode = st.radio(
         "Select reads to analyze:",
@@ -962,11 +963,11 @@ with col3:
         step=0.1,
         help="Delay between Gemini API calls to prevent rate limit (RPD) errors. Default: 0.5s. Increase if you hit rate limits."
     )
-    st.caption(f"💡 Current delay: {api_delay_seconds}s ({api_delay_seconds*1000:.0f}ms) between calls")
+    st.caption(f"Current delay: {api_delay_seconds}s ({api_delay_seconds*1000:.0f}ms) between calls")
 
 # Wavelength filtering section (optional)
 st.subheader("🔬 Wavelength Filtering (Optional)")
-st.caption("💡 Leave empty to use full data range. These filters apply before peak detection.")
+st.caption("Leave empty to use full data range. These filters apply before peak detection.")
 
 wavelength_col1, wavelength_col2, wavelength_col3 = st.columns(3)
 
@@ -1023,7 +1024,7 @@ if not use_step_size:
     wavelength_step_size = None
 
 # Analysis section
-st.header("🚀 Run Analysis")
+st.header("▶️ Run Analysis")
 
 col1, col2 = st.columns([3, 1])
 
@@ -1031,7 +1032,7 @@ with col1:
     run_button = st.button("Start Curve Fitting Analysis", type="primary", width='stretch')
 
 with col2:
-    if st.button("🗑️ Clear Files", width='stretch'):
+    if st.button("Clear Files", width='stretch'):
         st.session_state.cf_data_file = None
         st.session_state.cf_composition_file = None
         st.rerun()
@@ -1091,7 +1092,7 @@ if run_button or auto_run_triggered:
         # Convert Excel to CSV format if needed
         if is_excel:
             try:
-                st.info("📊 Converting Excel file to CSV format...")
+                st.info("Converting Excel file to CSV format...")
                 # Get plate format from session state if available
                 plate_format = st.session_state.get('plate_format', None)
                 
@@ -1127,7 +1128,7 @@ if run_button or auto_run_triggered:
                 line_col_counts = [len(line.split(',')) for line in lines if line.strip()]
                 st.text(f"DEBUG: Column counts per line: {line_col_counts}")
                 
-                st.success("✅ Excel file converted successfully!")
+                st.success("Excel file converted successfully!")
             except Exception as e:
                 st.error(f"❌ Error converting Excel file: {str(e)}")
                 import traceback
@@ -1222,7 +1223,7 @@ if run_button or auto_run_triggered:
             else:
                 # Create dummy composition CSV for Excel files as last resort
                 if is_excel:
-                    st.warning("⚠️ No composition file provided and default not found. Creating dummy composition file for Excel data.")
+                    st.warning("No composition file provided and default not found. Creating dummy composition file for Excel data.")
                     try:
                         # Read the converted CSV to get well names
                         with open(data_path, 'r', encoding='utf-8') as f:
@@ -1243,7 +1244,7 @@ if run_button or auto_run_triggered:
                         dummy_csv_content = create_dummy_composition_csv(well_names)
                         with open(comp_path, "w", encoding='utf-8') as f:
                             f.write(dummy_csv_content)
-                        st.info(f"✅ Created dummy composition file with {len(well_names)} acquisitions/reads: {well_names[:10]}{'...' if len(well_names) > 10 else ''}")
+                        st.info(f"Created dummy composition file with {len(well_names)} acquisitions/reads: {well_names[:10]}{'...' if len(well_names) > 10 else ''}")
                     except Exception as e:
                         st.error(f"❌ Error creating composition file: {str(e)}")
                         import traceback
@@ -1318,10 +1319,8 @@ if run_button or auto_run_triggered:
 
         # Check if we should auto-run curve fitting from watcher trigger
         if st.session_state.get("auto_run_curve_fitting", False):
-            # Use auto-run parameters
-            data_path = st.session_state.auto_run_data_file
-            comp_path = st.session_state.auto_run_comp_file
-            auto_params = st.session_state.auto_run_params
+            # Use auto-run parameters but keep the temp CSV paths we just created
+            auto_params = st.session_state.auto_run_params or {}
             wells_to_analyze = auto_params.get("wells_to_analyze")
             reads_selection = auto_params.get("reads_to_analyze", "auto")
             read_type_filter = auto_params.get("read_type", "em_spectrum")
@@ -1329,12 +1328,12 @@ if run_button or auto_run_triggered:
             r2_target = auto_params.get("r2_target", 0.90)
             max_attempts = auto_params.get("max_attempts", 3)
             api_delay_seconds = auto_params.get("api_delay_seconds", 0.5)
-            
+
             # Clear the auto-run flag
             st.session_state.auto_run_curve_fitting = False
-            
+
             # Show that we're running automatically
-            st.info("🚀 **Auto-running curve fitting with detected file...**")
+            st.info("Auto-running curve fitting with detected file...")
         
         # Create progress tracking
         progress_bar = st.progress(0)
@@ -1370,7 +1369,37 @@ if run_button or auto_run_triggered:
             status_text.text("Analysis complete!")
 
             if result["success"]:
-                st.success(f"✅ Analysis completed successfully! Processed {result['summary']['total_wells']} wells.")
+                st.success(f"Analysis completed successfully! Processed {result['summary']['total_wells']} wells.")
+
+                # Persist key input files for downstream ML usage
+                data_file_name = data_file.name if data_file else "curve_fitting"
+                base_name = os.path.splitext(data_file_name)[0]
+                base_name = re.sub(r'[<>:"/\\|?*]', '_', base_name).strip()
+                results_dir = Path(__file__).parent.parent / "results"
+                results_dir.mkdir(exist_ok=True)
+
+                spectral_copy = results_dir / f"{base_name}_spectral.csv"
+                composition_copy = results_dir / f"{base_name}_composition.csv"
+                try:
+                    if os.path.exists(data_path):
+                        shutil.copy2(data_path, spectral_copy)
+                    if os.path.exists(comp_path):
+                        shutil.copy2(comp_path, composition_copy)
+                except Exception as e:
+                    st.warning(f"Could not persist input files for ML: {e}")
+
+                # Store paths for ML automation and ML Models page
+                st.session_state.workflow_curve_fitting_files = {
+                    "results_json": result.get("files", {}).get("json_results"),
+                    "results_csv": result.get("files", {}).get("csv_export"),
+                    "composition_csv": str(composition_copy) if composition_copy.exists() else None,
+                    "spectral_csv": str(spectral_copy) if spectral_copy.exists() else None,
+                }
+                st.session_state.ml_auto_json_path = result.get("files", {}).get("json_results")
+                st.session_state.ml_auto_csv_path = result.get("files", {}).get("csv_export")
+                st.session_state.ml_auto_composition_path = (
+                    str(composition_copy) if composition_copy.exists() else None
+                )
                 
                 # Check if ML Models step is next in workflow and marked as automatic
                 workflow_auto_flags = st.session_state.get("workflow_auto_flags", {})
@@ -1392,7 +1421,7 @@ if run_button or auto_run_triggered:
                 selected_ml_model = st.session_state.get("optimization_model_choice")
                 
                 if auto_ml_enabled and selected_ml_model:
-                    with st.spinner("🤖 Automatically running ML model..."):
+                    with st.spinner("Automatically running ML model..."):
                         try:
                             from tools.ml_automation import run_automated_ml_model
                             
@@ -1408,11 +1437,12 @@ if run_button or auto_run_triggered:
                                 model_choice=selected_ml_model,
                                 json_path=json_file,
                                 csv_path=csv_file,
+                                composition_csv=st.session_state.get("ml_auto_composition_path"),
                                 auto_config=ml_config,
                             )
                             
                             if ml_result.get("success"):
-                                st.success(f"✅ ML Model ({selected_ml_model}) executed successfully!")
+                                st.success(f"ML Model ({selected_ml_model}) executed successfully!")
                                 
                                 # Store results in session state for Analysis Agent
                                 if selected_ml_model == "Monte Carlo Decision Tree (external)":
@@ -1440,7 +1470,7 @@ if run_button or auto_run_triggered:
                                     st.dataframe(candidates_df, width='stretch')
                                 elif ml_result.get("optimization_stats"):
                                     # Display Monte Carlo stats
-                                    st.subheader("🤖 Monte Carlo Decision Tree Results")
+                                    st.subheader("🌲 Monte Carlo Decision Tree Results")
                                     stats = ml_result.get("optimization_stats", {})
                                     col1, col2, col3, col4 = st.columns(4)
                                     with col1:
@@ -1454,13 +1484,15 @@ if run_button or auto_run_triggered:
                                 
                                 # Auto-route to Analysis Agent if enabled
                                 if st.session_state.get("auto_route_to_analysis", False):
-                                    st.info("🔄 Routing to Analysis Agent...")
+                                    st.info("Routing to Analysis Agent...")
                                     st.session_state.next_agent = "analysis"
                                     st.rerun()
                             else:
-                                st.warning(f"⚠️ ML Model execution failed: {ml_result.get('error', 'Unknown error')}")
+                                st.warning(
+                                    f"ML Model execution failed: {ml_result.get('error', 'Unknown error')}"
+                                )
                         except Exception as e:
-                            st.warning(f"⚠️ Automatic ML model execution failed: {str(e)}")
+                            st.warning(f"Automatic ML model execution failed: {str(e)}")
                             import traceback
                             st.exception(e)
 
@@ -1484,7 +1516,7 @@ if run_button or auto_run_triggered:
                     # Include read number in label to make it unique
                     read_label = f" (Read {read_num})" if read_num else ""
                     
-                    with st.expander(f"Well {well_name}{read_label} - R²: {fit_result.stats.r2:.4f}", expanded=False):
+                    with st.expander(f"📈 Well {well_name}{read_label} - R²: {fit_result.stats.r2:.4f}", expanded=False):
                         # Quality assessment
                         quality = well_result['quality_assessment']
                         st.write("**Fit Quality:**")
@@ -1527,7 +1559,7 @@ if run_button or auto_run_triggered:
                                     read_num = well_result.get('read', '')
                                     unique_key = f"download_plot_{well_name}_read{read_num}"
                                     btn = st.download_button(
-                                        label=f"📥 Download Plot (Well {well_name})",
+                                        label=f"Download Plot (Well {well_name})",
                                         data=file,
                                         file_name=f"fitting_plot_{well_name}_read{read_num}.png",
                                         mime="image/png",
@@ -1557,7 +1589,7 @@ if run_button or auto_run_triggered:
                             # Use stable key based on file path to prevent rerun
                             json_key = f"download_json_{hash(json_path)}"
                             col1.download_button(
-                                "📄 Download JSON Results",
+                                "Download JSON Results",
                                 json_data,
                                 f"{base_name}_peak_fit_results.json",
                                 "application/json",
@@ -1574,13 +1606,19 @@ if run_button or auto_run_triggered:
                             # Use stable key based on file path to prevent rerun
                             csv_key = f"download_csv_{hash(csv_path)}"
                             col2.download_button(
-                                "📊 Download CSV Export",
+                                "Download CSV Export",
                                 csv_data,
                                 f"{base_name}_peak_fit_export.csv",
                                 "text/csv",
                                 width='stretch',
                                 key=csv_key
                             )
+
+                # Workflow: route to ML Models after curve fitting completes
+                if st.session_state.get("workflow_active"):
+                    st.session_state.workflow_curve_fitting_completed = True
+                    st.session_state.workflow_step = "ml_models"
+                    st.switch_page("pages/ml_models.py")
 
             else:
                 st.error(f"❌ Analysis failed: {result.get('error', 'Unknown error')}")
@@ -1592,7 +1630,7 @@ if run_button or auto_run_triggered:
 # Instructions section
 st.header("📖 Instructions")
 
-with st.expander("How to Use the Curve Fitting Agent", expanded=False):
+with st.expander("📖 How to Use the Curve Fitting Agent", expanded=False):
     st.markdown("""
     ### Data Format Requirements
 
@@ -1640,7 +1678,7 @@ with st.expander("How to Use the Curve Fitting Agent", expanded=False):
     """)
 
 # Sample data section
-st.header("📋 Sample Data")
+st.header("🧪 Sample Data")
 
 if st.button("Load Sample Data for Testing"):
     # Create sample data for testing
@@ -1666,7 +1704,7 @@ MAPbI3,0.0,0.0,0.5
 """
 
     st.download_button(
-        "📥 Download Sample Spectral Data",
+        "Download Sample Spectral Data",
         sample_data,
         "sample_spectral_data.csv",
         "text/csv",
@@ -1675,7 +1713,7 @@ MAPbI3,0.0,0.0,0.5
     )
 
     st.download_button(
-        "📥 Download Sample Composition Data",
+        "Download Sample Composition Data",
         sample_composition,
         "sample_composition.csv",
         "text/csv",
