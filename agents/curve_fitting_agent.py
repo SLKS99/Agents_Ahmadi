@@ -2,7 +2,8 @@ from agents.base import BaseAgent
 from tools.fitting_agent import (
     LLMClient, CurveFittingConfig, build_agent_config,
     curate_dataset, run_complete_analysis, get_xy_for_well,
-    save_all_wells_results, export_peak_data_to_csv
+    save_all_wells_results, export_peak_data_to_csv,
+    infer_wells_from_file_metadata,
 )
 import streamlit as st
 from tools.memory import MemoryManager
@@ -312,6 +313,13 @@ class CurveFittingAgent(BaseAgent):
                 reads_to_analyze = inferred_params.get("read_selection", "auto")
                 read_type = inferred_params.get("read_type", "em_spectrum")
                 wells_to_analyze = inferred_params.get("wells_to_analyze", None)
+                # Auto-guess wells from file metadata (Full Plate, A1..A7, 35 slideglass)
+                if wells_to_analyze is None:
+                    inferred_wells = infer_wells_from_file_metadata(str(data_path))
+                    if inferred_wells:
+                        wells_to_analyze = inferred_wells
+                        logger.info(f"Auto-inferred wells from metadata: {len(wells_to_analyze)} wells")
+                        print(f"[INFO] Auto-inferred wells from file metadata: {len(wells_to_analyze)} wells ({wells_to_analyze[0]}..{wells_to_analyze[-1]})")
                 api_delay = inferred_params.get("api_delay_seconds", 0.5)
                 
                 logger.info(f"Parameters: max_peaks={max_peaks}, r2_target={r2_target}, "

@@ -20,7 +20,7 @@ memory = MemoryManager()
 memory.init_session()
 
 st.set_page_config(layout="wide")
-st.title("🤖 ML Models")
+st.title(" ML Models")
 st.markdown(
     "Train and compare different ML models on curve fitting results and composition data, "
     "then use them for optimization cycles (exploration/exploitation)."
@@ -613,6 +613,77 @@ if model_choice == MODEL_SINGLE_GP:
     # ---------------------------------------------------------------------
     # Single-objective GP (scikit-learn) using JSON + composition CSV
     # ---------------------------------------------------------------------
+    # Auto-run when arriving from curve fitting with automation enabled
+    _auto_files = st.session_state.get("workflow_curve_fitting_files", {})
+    _auto_json = _auto_files.get("results_json") or st.session_state.get("ml_auto_json_path")
+    _auto_comp = _auto_files.get("composition_csv") or st.session_state.get("ml_auto_composition_path")
+    _should_auto_run = (
+        st.session_state.get("workflow_active")
+        and st.session_state.get("auto_ml_after_curve_fitting", False)
+        and st.session_state.get("workflow_curve_fitting_completed", False)
+        and _auto_json and os.path.exists(str(_auto_json))
+        and _auto_comp and os.path.exists(str(_auto_comp))
+        and (st.session_state.get("workflow_ml_model_choice") == MODEL_SINGLE_GP
+             or st.session_state.get("optimization_model_choice") == MODEL_SINGLE_GP)
+    )
+    if _should_auto_run:
+        with st.spinner("Training GP model and generating acquisition batch..."):
+            try:
+                from tools.ml_automation import run_automated_ml_model
+                ml_config = st.session_state.get("ml_model_config", {})
+                ml_result = run_automated_ml_model(
+                    model_choice=MODEL_SINGLE_GP,
+                    json_path=_auto_json,
+                    csv_path=_auto_files.get("results_csv") or st.session_state.get("ml_auto_csv_path"),
+                    composition_csv=_auto_comp,
+                    auto_config=ml_config,
+                )
+                if ml_result.get("success"):
+                    st.session_state.gp_results = {
+                        "model_type": ml_result.get("model_type", "SingleGP"),
+                        "kernel": ml_result.get("kernel", "RBF"),
+                        "target": ml_result.get("target", "peak_1_wavelength"),
+                        "acquisition_method": ml_result.get("acquisition_method", "UCB"),
+                        "beta": ml_result.get("beta", 2.0),
+                        "automated": True,
+                        "top_candidates": ml_result.get("top_candidates", []),
+                        "suggested_compositions": ml_result.get("suggested_compositions", []),
+                        "predictions": ml_result.get("predictions", {}),
+                        "uncertainty_stats": ml_result.get("uncertainty_stats", {}),
+                    }
+                    st.session_state.gp_results_available = True
+                    st.session_state.analysis_ready = True
+                    st.success("GP trained. Acquisition batch generated.")
+                    # Plot: GP mean + 95% CI + training points (reference style)
+                    if ml_result.get("gp_ucb_acquisition_plot") and os.path.exists(ml_result["gp_ucb_acquisition_plot"]):
+                        st.subheader("📊 GP Regression (mean + 95% CI + acquisition)")
+                        import streamlit.components.v1 as components
+                        with open(ml_result["gp_ucb_acquisition_plot"], "r", encoding="utf-8") as f:
+                            components.html(f.read(), height=520, scrolling=False)
+                    # Batch from acquisition
+                    if ml_result.get("suggested_compositions"):
+                        st.subheader("📋 Acquisition Batch (next experiments)")
+                        batch_df = pd.DataFrame([
+                            {"Rank": s["rank"], **s.get("compositions", {}),
+                             "Predicted": s.get("predicted_value"), "Uncertainty": s.get("uncertainty"),
+                             "Acquisition": s.get("acquisition_score")}
+                            for s in ml_result["suggested_compositions"]
+                        ])
+                        st.dataframe(batch_df, use_container_width=True)
+                    st.session_state.workflow_curve_fitting_completed = False  # Prevent re-auto-run
+                    st.info("Switching to Analysis Agent...")
+                    st.switch_page("pages/analysis.py")
+                else:
+                    st.error(f"ML failed: {ml_result.get('error', 'Unknown')}")
+                    if ml_result.get("traceback"):
+                        with st.expander("Traceback"):
+                            st.code(ml_result["traceback"])
+            except Exception as e:
+                st.error(f"Auto ML failed: {e}")
+                import traceback
+                st.exception(e)
+        st.stop()
+
     st.header("📥 Data Input")
 
     col1, col2 = st.columns(2)
@@ -710,24 +781,28 @@ if model_choice == MODEL_SINGLE_GP:
 
             col1, col2, col3 = st.columns(3)
             with col1:
-                kernel_type = st.selectbox("Kernel Type", ["RBF", "Matern", "RBF+Matern"], index=0)
+                kernel_type = st.selectbox("Kernel Type", ["RBF", "Matern", "RBF+Matern"], index=0, key="single_gp_kernel")
             with col2:
                 alpha = st.number_input(
                     "Alpha (noise level)", min_value=1e-10, max_value=1.0, value=1e-6, format="%.2e"
                 )
-            with col3:
-                target_col = st.selectbox("Target Variable", ["r_squared", "rmse", "num_peaks"], index=0)
+            # Target options: PL metrics (wavelength, intensity, FWHM) for 2D GP (composition vs property)
+            target_options = ["r_squared", "rmse", "num_peaks"]
+            pl_targets = [c for c in ["peak_1_wavelength", "peak_1_intensity", "peak_1_fwhm"] if c in X_df.columns]
+            target_options = pl_targets + target_options  # PL metrics first for composition vs wavelength/intensity/FWHM
+            target_col = st.selectbox(
+                "Target Variable (for 2D GP: composition vs wavelength/intensity/FWHM)",
+                target_options,
+                index=0,
+                help="Use peak_1_wavelength for composition vs wavelength 2D GP",
+            )
 
             # Update target if changed
-            if target_col == "r_squared":
-                y_series = X_df["r_squared"]
-            elif target_col == "rmse":
-                y_series = X_df["rmse"]
-            elif target_col == "num_peaks":
-                y_series = X_df["num_peaks"]
+            y_series = X_df[target_col] if target_col in X_df.columns else X_df["r_squared"]
 
             # Prepare feature matrix (exclude well and target columns)
-            feature_cols = [col for col in X_df.columns if col not in ["well", "r_squared", "rmse", "num_peaks"]]
+            exclude_cols = ["well", "r_squared", "rmse", "num_peaks"] + pl_targets
+            feature_cols = [col for col in X_df.columns if col not in exclude_cols]
             X = X_df[feature_cols].values
             y = y_series.values
 
@@ -756,68 +831,81 @@ if model_choice == MODEL_SINGLE_GP:
                     # Predictions on training data
                     y_pred, y_std = gp_model.predict(X, return_std=True)
 
-                    # Visualization
-                    st.header("📊 Model Performance")
+                    # Primary visualization: GP Regression (composition vs target, GP mean, 95% CI, acquisition)
+                    st.header("📊 GP Regression (composition vs target)")
+                    candidates_df = generate_exploration_candidates(composition_data, n_candidates=20)
+                    X_candidates = candidates_df[feature_cols].values
+                    y_pred_candidates, y_std_candidates = gp_model.predict(X_candidates, return_std=True)
+                    acquisition_values = gp_model.acquisition_function(X_candidates, method="UCB", beta=2.0)
+                    top_indices = np.argsort(acquisition_values)[::-1][:10]
 
-                    fig = make_subplots(
-                        rows=1,
-                        cols=2,
-                        subplot_titles=("Predictions vs Actual", "Residuals"),
-                        horizontal_spacing=0.15,
-                    )
+                    comp_cols_all = [col for col in feature_cols if col.startswith("composition_")]
+                    comp_col = comp_cols_all[0] if comp_cols_all else None
+                    if comp_col and comp_col in X_df.columns and target_col in X_df.columns:
+                        fig_gp = go.Figure()
+                        x_min, x_max = float(X_df[comp_col].min()), float(X_df[comp_col].max())
+                        x_grid = np.linspace(x_min, x_max, 100)
+                        grid_X = np.tile(candidates_df[feature_cols].median().values, (len(x_grid), 1))
+                        col_idx = feature_cols.index(comp_col)
+                        grid_X[:, col_idx] = x_grid
+                        mu_grid, std_grid = gp_model.predict(grid_X, return_std=True)
+                        upper = mu_grid + 1.96 * std_grid
+                        lower = mu_grid - 1.96 * std_grid
+                        fig_gp.add_trace(go.Scatter(
+                            x=X_df[comp_col], y=X_df[target_col], mode="markers", name="Training data",
+                            marker=dict(color="rgb(31, 119, 180)", size=10, symbol="circle"), text=X_df["well"]
+                        ))
+                        fig_gp.add_trace(go.Scatter(
+                            x=np.concatenate([x_grid, x_grid[::-1]]),
+                            y=np.concatenate([upper, lower[::-1]]), fill="toself",
+                            fillcolor="rgba(255, 165, 0, 0.25)", line=dict(width=0), name="95% CI"
+                        ))
+                        fig_gp.add_trace(go.Scatter(
+                            x=x_grid, y=mu_grid, mode="lines", name="GP mean",
+                            line=dict(color="rgb(255, 127, 14)", width=2)
+                        ))
+                        top_data = candidates_df.iloc[top_indices]
+                        fig_gp.add_trace(go.Scatter(
+                            x=top_data[comp_col], y=y_pred_candidates[top_indices],
+                            mode="markers+text", name="Acquisition batch",
+                            marker=dict(color="red", size=14, symbol="star"),
+                            text=[f"#{i+1}" for i in range(len(top_indices))],
+                            textposition="top center", textfont=dict(size=9)
+                        ))
+                        fig_gp.update_layout(
+                            title=f"GP Regression — {comp_col.replace('composition_','')} vs {target_col.replace('_',' ').title()}",
+                            xaxis_title=comp_col.replace("composition_", ""),
+                            yaxis_title=target_col.replace("_", " ").title(),
+                            height=500, showlegend=True,
+                        )
+                        st.plotly_chart(fig_gp, use_container_width=True)
 
-                    # Predictions plot
-                    fig.add_trace(
-                        go.Scatter(
-                            x=y,
-                            y=y_pred,
-                            mode="markers",
-                            name="Predictions",
-                            error_y=dict(type="data", array=y_std, visible=True),
-                            marker=dict(color="blue", size=8),
-                        ),
-                        row=1,
-                        col=1,
-                    )
-
-                    # Perfect prediction line
-                    min_val = min(y.min(), y_pred.min())
-                    max_val = max(y.max(), y_pred.max())
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[min_val, max_val],
-                            y=[min_val, max_val],
-                            mode="lines",
-                            name="Perfect",
-                            line=dict(color="red", dash="dash"),
-                        ),
-                        row=1,
-                        col=1,
-                    )
-
-                    # Residuals plot
-                    residuals = y - y_pred
-                    fig.add_trace(
-                        go.Scatter(
-                            x=y_pred,
-                            y=residuals,
-                            mode="markers",
-                            name="Residuals",
-                            marker=dict(color="green", size=8),
-                        ),
-                        row=1,
-                        col=2,
-                    )
-
-                    fig.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=2)
-
-                    fig.update_xaxes(title_text="Actual", row=1, col=1)
-                    fig.update_yaxes(title_text="Predicted", row=1, col=1)
-                    fig.update_xaxes(title_text="Predicted", row=1, col=2)
-                    fig.update_yaxes(title_text="Residuals", row=1, col=2)
-
-                    fig.update_layout(height=500, showlegend=True)
-                    st.plotly_chart(fig, use_container_width=True)
+                    with st.expander("Model diagnostics (Predictions vs Actual, Residuals)"):
+                        fig = make_subplots(
+                            rows=1, cols=2,
+                            subplot_titles=("Predictions vs Actual", "Residuals"),
+                            horizontal_spacing=0.15,
+                        )
+                        fig.add_trace(
+                            go.Scatter(x=y, y=y_pred, mode="markers", name="Predictions",
+                                error_y=dict(type="data", array=y_std, visible=True),
+                                marker=dict(color="blue", size=8)), row=1, col=1)
+                        min_val, max_val = min(y.min(), y_pred.min()), max(y.max(), y_pred.max())
+                        fig.add_trace(
+                            go.Scatter(x=[min_val, max_val], y=[min_val, max_val],
+                                mode="lines", name="Perfect", line=dict(color="red", dash="dash")),
+                            row=1, col=1)
+                        residuals = y - y_pred
+                        fig.add_trace(
+                            go.Scatter(x=y_pred, y=residuals, mode="markers", name="Residuals",
+                                marker=dict(color="green", size=8)), row=1, col=2)
+                        fig.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=2)
+                        fig.update_xaxes(title_text="Actual", row=1, col=1)
+                        fig.update_yaxes(title_text="Predicted", row=1, col=1)
+                        fig.update_xaxes(title_text="Predicted", row=1, col=2)
+                        fig.update_yaxes(title_text="Residuals", row=1, col=2)
+                        fig.update_layout(height=400, showlegend=True)
+                        st.plotly_chart(fig, use_container_width=True)
 
                     # Exploration
                     st.header("🧭 Exploration & Next Experiments")
@@ -887,45 +975,91 @@ if model_choice == MODEL_SINGLE_GP:
                             results_df = pd.DataFrame(results_list)
                             st.dataframe(results_df, use_container_width=True)
 
-                            # Visualization of exploration space
+                            # 2D GP visualization: GP mean + 95% CI + acquisition (reference style)
                             comp_cols_all = [col for col in feature_cols if col.startswith("composition_")]
-                            if len(comp_cols_all) >= 2:
-                                comp_cols = comp_cols_all[:2]
-
-                                fig_explore = go.Figure()
-
-                                # Training data
-                                fig_explore.add_trace(
-                                    go.Scatter(
-                                        x=X_df[comp_cols[0]],
-                                        y=X_df[comp_cols[1]],
-                                        mode="markers",
-                                        name="Training Data",
-                                        marker=dict(color="blue", size=10, symbol="circle"),
+                            if len(comp_cols_all) >= 1:
+                                comp_col = comp_cols_all[0]
+                                if comp_col in X_df.columns and target_col in X_df.columns:
+                                    fig_2d = go.Figure()
+                                    x_min, x_max = float(X_df[comp_col].min()), float(X_df[comp_col].max())
+                                    x_grid = np.linspace(x_min, x_max, 100)
+                                    grid_X = np.tile(candidates_df[feature_cols].median().values, (len(x_grid), 1))
+                                    col_idx = feature_cols.index(comp_col)
+                                    grid_X[:, col_idx] = x_grid
+                                    mu_grid, std_grid = gp_model.predict(grid_X, return_std=True)
+                                    ci95 = 1.96
+                                    upper, lower = mu_grid + ci95 * std_grid, mu_grid - ci95 * std_grid
+                                    # Training data (blue dots)
+                                    fig_2d.add_trace(go.Scatter(x=X_df[comp_col], y=X_df[target_col],
+                                        mode="markers", name="Training data",
+                                        marker=dict(color="rgb(31, 119, 180)", size=10, symbol="circle"),
+                                        text=X_df["well"]))
+                                    # 95% CI shaded
+                                    fig_2d.add_trace(go.Scatter(x=np.concatenate([x_grid, x_grid[::-1]]),
+                                        y=np.concatenate([upper, lower[::-1]]), fill="toself",
+                                        fillcolor="rgba(255, 165, 0, 0.25)", line=dict(width=0), name="95% CI"))
+                                    # GP mean (orange line)
+                                    fig_2d.add_trace(go.Scatter(x=x_grid, y=mu_grid, mode="lines",
+                                        name="GP mean", line=dict(color="rgb(255, 127, 14)", width=2)))
+                                    # Acquisition batch (red stars)
+                                    top_candidates_data = candidates_df.iloc[top_indices]
+                                    fig_2d.add_trace(go.Scatter(x=top_candidates_data[comp_col],
+                                        y=y_pred_candidates[top_indices], mode="markers+text",
+                                        name="Acquisition batch", marker=dict(color="red", size=14, symbol="star"),
+                                        text=[f"#{i+1} acq={acquisition_values[idx]:.2f}" for i, idx in enumerate(top_indices)],
+                                        textposition="top center", textfont=dict(size=9)))
+                                    fig_2d.update_layout(
+                                        title=f"GP Regression — {comp_col.replace('composition_','')} vs {target_col.replace('_',' ').title()}",
+                                        xaxis_title=comp_col.replace("composition_", ""),
+                                        yaxis_title=target_col.replace("_", " ").title(),
+                                        height=500, showlegend=True,
                                     )
-                                )
-
-                                # Top candidates
-                                top_candidates_data = candidates_df.iloc[top_indices]
-                                fig_explore.add_trace(
-                                    go.Scatter(
-                                        x=top_candidates_data[comp_cols[0]],
-                                        y=top_candidates_data[comp_cols[1]],
-                                        mode="markers",
-                                        name="Top Candidates",
-                                        marker=dict(color="red", size=15, symbol="star"),
-                                        text=[f"Candidate {i+1}" for i in range(len(top_indices))],
-                                        textposition="top center",
+                                    st.plotly_chart(fig_2d, use_container_width=True)
+                                if len(comp_cols_all) >= 2:
+                                    comp_cols = comp_cols_all[:2]
+                                    fig_explore = go.Figure()
+                                    fig_explore.add_trace(
+                                        go.Scatter(
+                                            x=X_df[comp_cols[0]],
+                                            y=X_df[comp_cols[1]],
+                                            mode="markers",
+                                            name="Training Data",
+                                            marker=dict(color="blue", size=10, symbol="circle"),
+                                        )
                                     )
-                                )
+                                    top_candidates_data = candidates_df.iloc[top_indices]
+                                    fig_explore.add_trace(
+                                        go.Scatter(
+                                            x=top_candidates_data[comp_cols[0]],
+                                            y=top_candidates_data[comp_cols[1]],
+                                            mode="markers",
+                                            name="Top Candidates",
+                                            marker=dict(color="red", size=15, symbol="star"),
+                                            text=[f"Candidate {i+1}" for i in range(len(top_indices))],
+                                            textposition="top center",
+                                        )
+                                    )
+                                    fig_explore.update_layout(
+                                        title="Exploration Space (Composition)",
+                                        xaxis_title=comp_cols[0].replace("composition_", ""),
+                                        yaxis_title=comp_cols[1].replace("composition_", ""),
+                                        height=500,
+                                    )
+                                    st.plotly_chart(fig_explore, use_container_width=True)
 
-                                fig_explore.update_layout(
-                                    title="Exploration Space",
-                                    xaxis_title=comp_cols[0],
-                                    yaxis_title=comp_cols[1],
-                                    height=500,
-                                )
-                                st.plotly_chart(fig_explore, use_container_width=True)
+                            # Build batch of suggested compositions for experiment agent
+                            suggested_compositions = []
+                            for idx in top_indices[:10]:
+                                c = candidates_df.iloc[idx]
+                                comp_row = {col.replace("composition_", ""): float(c[col])
+                                            for col in feature_cols if col.startswith("composition_")}
+                                suggested_compositions.append({
+                                    "rank": len(suggested_compositions) + 1,
+                                    "compositions": comp_row,
+                                    "predicted_value": float(y_pred_candidates[idx]),
+                                    "uncertainty": float(y_std_candidates[idx]),
+                                    "acquisition_score": float(acquisition_values[idx]),
+                                })
 
                             # Save results for analysis agent
                             gp_results = {
@@ -934,7 +1068,8 @@ if model_choice == MODEL_SINGLE_GP:
                                 "target": target_col,
                                 "cv_score": float(cv_scores.mean()),
                                 "cv_std": float(cv_scores.std()),
-                                "top_candidates": results_list[:5],  # Top 5 for analysis
+                                "top_candidates": results_list[:5],
+                                "suggested_compositions": suggested_compositions,
                                 "uncertainty_stats": {
                                     "mean": float(y_std_candidates.mean()),
                                     "std": float(y_std_candidates.std()),
@@ -1084,6 +1219,7 @@ if dual_gp_csv_file is not None:
                 perf_col = st.selectbox(
                     "Performance target column",
                     options=numeric_cols,
+                    key="dual_gp_perf_col",
                     index=numeric_cols.index(default_perf) if default_perf in numeric_cols else 0,
                 )
             with col_t2:
@@ -1094,8 +1230,9 @@ if dual_gp_csv_file is not None:
                     stab_col = st.selectbox(
                         "Stability target column",
                         options=numeric_cols,
-                    index=numeric_cols.index(default_stab) if default_stab in numeric_cols else 0,
-                )
+                        index=numeric_cols.index(default_stab) if default_stab in numeric_cols else 0,
+                        key="dual_gp_stab_col",
+                    )
 
             feature_default = [c for c in numeric_cols if c not in [perf_col, stab_col]]
             feature_cols_dual = st.multiselect(
@@ -1389,11 +1526,13 @@ if dual_gp_csv_file is not None:
 
                             st.exception(e)
 
-# Workflow: route to Analysis once results are ready
+# Workflow: offer manual Continue to Analysis (no auto-switch)
 if (
     st.session_state.get("workflow_active")
     and st.session_state.get("workflow_step") == "ml_models"
     and st.session_state.get("analysis_ready")
 ):
     st.session_state.workflow_step = "analysis"
-    st.switch_page("pages/analysis.py")
+    st.divider()
+    if st.button("Continue to Analysis Agent →", type="primary", use_container_width=True, key="ml_continue_analysis"):
+        st.switch_page("pages/analysis.py")

@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 from tools.memory import MemoryManager
 from agents.experiment_agent import ExperimentAgent
 
@@ -7,6 +8,69 @@ memory.init_session()
 
 st.set_page_config(layout="centered")
 st.title("🧪 Experiment Agent")
+
+# Show context when coming from Analysis Agent with GP/compositions
+gp_suggested = st.session_state.get("gp_suggested_compositions", [])
+analysis_recs = st.session_state.get("analysis_recommendations", [])
+analysis_report = st.session_state.get("analysis_full_report", "")
+if gp_suggested or analysis_recs or analysis_report:
+    with st.expander("📋 From Analysis Agent (Curve Fitting + GP)", expanded=True):
+        if analysis_report:
+            st.markdown("**Analysis Report:**")
+            st.markdown(analysis_report[:1500] + ("..." if len(analysis_report) > 1500 else ""))
+        if analysis_recs:
+            st.markdown("**Recommendations:**")
+            for r in analysis_recs[:5]:
+                st.markdown(f"- {r}")
+        if gp_suggested:
+            st.markdown("**GP Suggested Compositions (batch):**")
+            comp_df = pd.DataFrame([
+                {**c.get("compositions", {}), "predicted": c.get("predicted_value", ""), "uncertainty": c.get("uncertainty", "")}
+                for c in gp_suggested[:10]
+            ])
+            st.dataframe(comp_df, use_container_width=True)
+            # Generate worklist CSV from compositions and offer Jupyter upload
+            if st.button("Generate Worklist from GP Compositions & Upload to Jupyter", use_container_width=True):
+                jupyter_cfg = st.session_state.get("jupyter_config", {})
+                if jupyter_cfg.get("upload_enabled") and jupyter_cfg.get("server_url"):
+                    max_vol = st.session_state.experimental_constraints.get("liquid_handling", {}).get("max_volume_per_mixture", 50)
+                    materials = list(gp_suggested[0].get("compositions", {}).keys()) if gp_suggested else []
+                    if materials:
+                        wells = [f"A{i+1:02d}" for i in range(min(len(gp_suggested), 12))]
+                        rows = []
+                        for i, sc in enumerate(gp_suggested[:12]):
+                            comp = sc.get("compositions", {})
+                            row = {"Well": wells[i]}
+                            total = sum(abs(v) for v in comp.values()) or 1
+                            for m in materials:
+                                frac = abs(comp.get(m, 0)) / total
+                                row[f"{m}_uL"] = round(frac * max_vol, 1)
+                            rows.append(row)
+                        import io
+                        import csv
+                        buf = io.StringIO()
+                        fieldnames = ["Well"] + [f"{m}_uL" for m in materials]
+                        w = csv.DictWriter(buf, fieldnames=fieldnames)
+                        w.writeheader()
+                        w.writerows(rows)
+                        csv_content = buf.getvalue()
+                        from agents.experiment_agent import ExperimentAgent
+                        agent = ExperimentAgent("Experiment Agent", "", st.session_state.experimental_constraints)
+                        success, msg = agent.upload_to_jupyter(
+                            jupyter_cfg["server_url"],
+                            jupyter_cfg.get("token", ""),
+                            csv_content,
+                            "gp_suggested_compositions_worklist.csv",
+                            jupyter_cfg.get("notebook_path", "Automated Agent"),
+                        )
+                        if success:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("No composition data in suggestions.")
+                else:
+                    st.warning("Enable Jupyter upload in Settings and configure server URL.")
 
 # Optional manual trigger for the Experiment Agent
 st.markdown("Use the controls below to configure experimental constraints or trigger the agent directly.")
@@ -319,15 +383,16 @@ if (
     st.session_state.workflow_experiment_started = True
     _run_experiment_agent()
 
-# Workflow transition: move to Curve Fitting after outputs exist
+# Workflow transition: offer manual Continue (no auto-switch)
 if (
     st.session_state.get("workflow_active")
     and st.session_state.get("experimental_outputs")
-    and not st.session_state.get("workflow_experiment_completed")
 ):
     st.session_state.workflow_experiment_outputs = (
         st.session_state.experimental_outputs
     )
     st.session_state.workflow_experiment_completed = True
     st.session_state.workflow_step = "curve_fitting"
-    st.switch_page("pages/curve_fitting.py")
+    st.divider()
+    if st.button("Continue to Curve Fitting →", type="primary", use_container_width=True, key="exp_continue_curve"):
+        st.switch_page("pages/curve_fitting.py")

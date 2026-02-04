@@ -130,21 +130,11 @@ def _run_single_gp_automated(
 ) -> Dict[str, Any]:
     """Run single GP model automatically."""
     try:
-        # Import here to avoid circular imports
-        import sys
-        import importlib.util
-        
-        # Load ml_models module dynamically
-        ml_models_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pages", "ml_models.py")
-        if not os.path.exists(ml_models_path):
-            return {
-                "success": False,
-                "error": "ML models page not found. Please ensure ml_models.py exists.",
-            }
-        
-        spec = importlib.util.spec_from_file_location("ml_models", ml_models_path)
-        ml_models = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ml_models)
+        from tools.ml_core import (
+            GaussianProcessModel,
+            extract_features_from_results,
+            generate_exploration_candidates,
+        )
         
         # Load data
         with open(json_path, 'r') as f:
@@ -159,18 +149,29 @@ def _run_single_gp_automated(
         composition_data = pd.read_csv(composition_csv, index_col=0)
         
         # Extract features
-        X_df, y_series = ml_models.extract_features_from_results(results_data, composition_data)
+        X_df, y_series = extract_features_from_results(results_data, composition_data)
         
-        # Use R² as target by default
-        target_col = config.get("target", "r_squared")
-        if target_col == "r_squared":
+        # Plain ML: prefer peak position (peak_1_wavelength) when available; fallback to r_squared
+        target_col = config.get("target")
+        if not target_col and "peak_1_wavelength" in X_df.columns:
+            target_col = "peak_1_wavelength"
+        if not target_col:
+            target_col = "r_squared"
+        if target_col in X_df.columns:
+            y_series = X_df[target_col]
+        elif target_col == "r_squared":
             y_series = X_df["r_squared"]
         elif target_col == "rmse":
             y_series = X_df["rmse"]
         elif target_col == "num_peaks":
             y_series = X_df["num_peaks"]
+        else:
+            y_series = X_df["r_squared"]
         
-        feature_cols = [col for col in X_df.columns if col not in ["well", "r_squared", "rmse", "num_peaks"]]
+        exclude_cols = ["well", "r_squared", "rmse", "num_peaks"]
+        if target_col and target_col in X_df.columns:
+            exclude_cols.append(target_col)
+        feature_cols = [col for col in X_df.columns if col not in exclude_cols]
         X = X_df[feature_cols].values
         y = y_series.values
         
@@ -178,7 +179,7 @@ def _run_single_gp_automated(
         kernel_type = config.get("kernel_type", "RBF")
         alpha = config.get("alpha", 1e-6)
         
-        gp_model = ml_models.GaussianProcessModel(kernel_type=kernel_type, alpha=alpha)
+        gp_model = GaussianProcessModel(kernel_type=kernel_type, alpha=alpha)
         gp_model.fit(X, y, feature_cols, target_col)
         
         # Generate predictions
@@ -186,7 +187,7 @@ def _run_single_gp_automated(
         
         # Generate exploration candidates
         n_candidates = config.get("n_candidates", 20)
-        candidates_df = ml_models.generate_exploration_candidates(composition_data, n_candidates)
+        candidates_df = generate_exploration_candidates(composition_data, n_candidates)
         X_candidates = candidates_df[feature_cols].values
         
         y_pred_candidates, y_std_candidates = gp_model.predict(X_candidates, return_std=True)
@@ -197,6 +198,7 @@ def _run_single_gp_automated(
         top_indices = np.argsort(acquisition_values)[::-1][:10]
         
         top_candidates = []
+        suggested_compositions = []
         for idx in top_indices:
             candidate = candidates_df.iloc[idx]
             top_candidates.append({
@@ -206,11 +208,74 @@ def _run_single_gp_automated(
                 "uncertainty": float(y_std_candidates[idx]),
                 "acquisition_score": float(acquisition_values[idx]),
             })
+            comp_row = {col.replace("composition_", ""): float(candidate[col])
+                       for col in feature_cols if col.startswith("composition_")}
+            suggested_compositions.append({
+                "rank": len(suggested_compositions) + 1,
+                "compositions": comp_row,
+                "predicted_value": float(y_pred_candidates[idx]),
+                "uncertainty": float(y_std_candidates[idx]),
+                "acquisition_score": float(acquisition_values[idx]),
+            })
         
-        return {
+        # Generate 2D plot: GP mean + 95% CI + training points + acquisition batch (reference style)
+        plot_path = None
+        comp_cols_all = [c for c in feature_cols if c.startswith("composition_")]
+        if len(comp_cols_all) >= 1 and target_col in X_df.columns:
+            try:
+                import plotly.graph_objects as go
+                comp_col = comp_cols_all[0]
+                x_min, x_max = float(X_df[comp_col].min()), float(X_df[comp_col].max())
+                x_grid = np.linspace(x_min, x_max, 100)
+                grid_X = np.tile(candidates_df[feature_cols].median().values, (len(x_grid), 1))
+                col_idx = feature_cols.index(comp_col)
+                grid_X[:, col_idx] = x_grid
+                mu_grid, std_grid = gp_model.predict(grid_X, return_std=True)
+                ci95 = 1.96  # 95% CI
+                upper = mu_grid + ci95 * std_grid
+                lower = mu_grid - ci95 * std_grid
+                fig = go.Figure()
+                # Training data (blue dots)
+                fig.add_trace(go.Scatter(
+                    x=X_df[comp_col], y=X_df[target_col], mode="markers",
+                    name="Training data", marker=dict(color="rgb(31, 119, 180)", size=10, symbol="circle")))
+                # 95% CI shaded band (light orange)
+                fig.add_trace(go.Scatter(
+                    x=np.concatenate([x_grid, x_grid[::-1]]),
+                    y=np.concatenate([upper, lower[::-1]]),
+                    fill="toself", fillcolor="rgba(255, 165, 0, 0.25)", line=dict(width=0),
+                    name="95% CI"))
+                # GP mean (solid orange line)
+                fig.add_trace(go.Scatter(
+                    x=x_grid, y=mu_grid, mode="lines", name="GP mean",
+                    line=dict(color="rgb(255, 127, 14)", width=2)))
+                # Acquisition batch (red stars)
+                top_data = candidates_df.iloc[top_indices]
+                fig.add_trace(go.Scatter(
+                    x=top_data[comp_col], y=y_pred_candidates[top_indices],
+                    mode="markers+text", name="Acquisition batch",
+                    marker=dict(color="red", size=14, symbol="star"),
+                    text=[f"#{i+1}" for i in range(len(top_indices))], textposition="top center"))
+                fig.update_layout(
+                    title=f"GP Regression — {comp_col.replace('composition_','')} vs {target_col}",
+                    xaxis_title=comp_col.replace("composition_", ""), yaxis_title=target_col,
+                    height=450, showlegend=True, legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
+                results_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results")
+                os.makedirs(results_dir, exist_ok=True)
+                plot_path = os.path.join(results_dir, "gp_ucb_acquisition_2d.html")
+                fig.write_html(plot_path)
+            except Exception as plot_err:
+                plot_path = None  # Non-fatal
+        
+        out = {
             "success": True,
             "model_type": "SingleGP",
+            "kernel": kernel_type,
+            "target": target_col,
+            "acquisition_method": "UCB",
+            "beta": float(beta),
             "top_candidates": top_candidates,
+            "suggested_compositions": suggested_compositions,
             "predictions": {
                 "mean": float(np.mean(y_pred)),
                 "std": float(np.std(y_pred)),
@@ -220,6 +285,9 @@ def _run_single_gp_automated(
                 "max": float(y_std_candidates.max()),
             },
         }
+        if plot_path:
+            out["gp_ucb_acquisition_plot"] = plot_path
+        return out
     
     except Exception as e:
         import traceback
@@ -236,21 +304,7 @@ def _run_dual_gp_automated(
 ) -> Dict[str, Any]:
     """Run dual GP model automatically."""
     try:
-        # Import here to avoid circular imports
-        import sys
-        import importlib.util
-        
-        # Load ml_models module dynamically
-        ml_models_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pages", "ml_models.py")
-        if not os.path.exists(ml_models_path):
-            return {
-                "success": False,
-                "error": "ML models page not found. Please ensure ml_models.py exists.",
-            }
-        
-        spec = importlib.util.spec_from_file_location("ml_models", ml_models_path)
-        ml_models = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(ml_models)
+        from tools.ml_core import TorchGaussianProcess, instability_score
         
         # Load CSV
         df_dual = pd.read_csv(csv_path)
@@ -284,7 +338,7 @@ def _run_dual_gp_automated(
                     multi_peak_comps = df_dual[multi_peak_mask][['composition_number', 'iteration']].values
                     compositions_with_multiple_peaks = [tuple(row) for row in multi_peak_comps]
             
-            y_stab_raw = ml_models.instability_score(
+            y_stab_raw = instability_score(
                 df_dual,
                 compositions_with_multiple_peaks=compositions_with_multiple_peaks if compositions_with_multiple_peaks else None,
                 target_wavelength=instability_params.get('target_wavelength', 700),
@@ -324,8 +378,8 @@ def _run_dual_gp_automated(
         use_multiplicative = config.get("use_multiplicative_adjustment", True)
         
         # Train GPs
-        gp_perf = ml_models.TorchGaussianProcess(lengthscale=lengthscale, variance=1.0, noise=noise_level)
-        gp_stab = ml_models.TorchGaussianProcess(lengthscale=lengthscale, variance=1.0, noise=noise_level)
+        gp_perf = TorchGaussianProcess(lengthscale=lengthscale, variance=1.0, noise=noise_level)
+        gp_stab = TorchGaussianProcess(lengthscale=lengthscale, variance=1.0, noise=noise_level)
         
         gp_perf.fit(X_dual, y_perf)
         gp_stab.fit(X_dual, y_stab)

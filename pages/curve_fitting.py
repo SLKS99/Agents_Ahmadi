@@ -1322,6 +1322,13 @@ if run_button or auto_run_triggered:
             # Use auto-run parameters but keep the temp CSV paths we just created
             auto_params = st.session_state.auto_run_params or {}
             wells_to_analyze = auto_params.get("wells_to_analyze")
+            # Auto-guess wells from file metadata (Full Plate, A1..A7, 35 slideglass) when not specified
+            if wells_to_analyze is None and data_path:
+                from tools.fitting_agent import infer_wells_from_file_metadata
+                inferred = infer_wells_from_file_metadata(str(data_path))
+                if inferred:
+                    wells_to_analyze = inferred
+                    st.info(f"Auto-inferred wells from file: {len(wells_to_analyze)} wells ({inferred[0]}..{inferred[-1]})")
             reads_selection = auto_params.get("reads_to_analyze", "auto")
             read_type_filter = auto_params.get("read_type", "em_spectrum")
             max_peaks = auto_params.get("max_peaks", 4)
@@ -1401,100 +1408,29 @@ if run_button or auto_run_triggered:
                     str(composition_copy) if composition_copy.exists() else None
                 )
                 
-                # Check if ML Models step is next in workflow and marked as automatic
+                # Auto-switch to ML Models page when automation enabled (do NOT run ML here)
                 workflow_auto_flags = st.session_state.get("workflow_auto_flags", {})
                 manual_workflow = st.session_state.get("manual_workflow", [])
-                workflow_index = st.session_state.get("workflow_index", 0)
-                
-                # Check if ML Models is next and should auto-execute
+                try:
+                    cf_idx = manual_workflow.index("Curve Fitting")
+                    next_step_index = cf_idx + 1
+                except ValueError:
+                    next_step_index = -1
                 ml_auto_from_workflow = (
-                    workflow_index < len(manual_workflow)
-                    and manual_workflow[workflow_index] == "ML Models"
+                    next_step_index >= 0
+                    and next_step_index < len(manual_workflow)
+                    and manual_workflow[next_step_index] == "ML Models"
                     and workflow_auto_flags.get("ML Models", False)
                 )
-                
-                # Automatic ML model execution (if enabled via checkbox OR workflow)
                 auto_ml_enabled = (
                     st.session_state.get("auto_ml_after_curve_fitting", False)
                     or ml_auto_from_workflow
                 )
-                selected_ml_model = st.session_state.get("optimization_model_choice")
-                
-                if auto_ml_enabled and selected_ml_model:
-                    with st.spinner("Automatically running ML model..."):
-                        try:
-                            from tools.ml_automation import run_automated_ml_model
-                            
-                            # Get ML model configuration from session state
-                            ml_config = st.session_state.get("ml_model_config", {})
-                            
-                            # Get file paths from result
-                            json_file = result.get("files", {}).get("json_results")
-                            csv_file = result.get("files", {}).get("csv_export")
-                            
-                            # Run ML model automatically
-                            ml_result = run_automated_ml_model(
-                                model_choice=selected_ml_model,
-                                json_path=json_file,
-                                csv_path=csv_file,
-                                composition_csv=st.session_state.get("ml_auto_composition_path"),
-                                auto_config=ml_config,
-                            )
-                            
-                            if ml_result.get("success"):
-                                st.success(f"ML Model ({selected_ml_model}) executed successfully!")
-                                
-                                # Store results in session state for Analysis Agent
-                                if selected_ml_model == "Monte Carlo Decision Tree (external)":
-                                    # Store Monte Carlo results separately
-                                    st.session_state.monte_carlo_results = ml_result
-                                    st.session_state.monte_carlo_results_available = True
-                                else:
-                                    # Store GP results (existing behavior)
-                                    st.session_state.gp_results = {
-                                        "model_type": ml_result.get("model_type", "Unknown"),
-                                        "automated": True,
-                                        "top_candidates": ml_result.get("top_candidates", []),
-                                        "predictions": ml_result.get("predictions", {}),
-                                        "uncertainty_stats": ml_result.get("uncertainty_stats", {}),
-                                    }
-                                    st.session_state.gp_results_available = True
-                                
-                                st.session_state.analysis_ready = True
-                                
-                                # Display top candidates
-                                if ml_result.get("top_candidates"):
-                                    st.subheader("🤖 ML Model Recommendations")
-                                    import pandas as pd
-                                    candidates_df = pd.DataFrame(ml_result["top_candidates"])
-                                    st.dataframe(candidates_df, width='stretch')
-                                elif ml_result.get("optimization_stats"):
-                                    # Display Monte Carlo stats
-                                    st.subheader("🌲 Monte Carlo Decision Tree Results")
-                                    stats = ml_result.get("optimization_stats", {})
-                                    col1, col2, col3, col4 = st.columns(4)
-                                    with col1:
-                                        st.metric("Total Cycles", stats.get("total_cycles", "N/A"))
-                                    with col2:
-                                        st.metric("Best Quality", f"{stats.get('best_quality', 0):.2f}")
-                                    with col3:
-                                        st.metric("Total Improvement", f"{stats.get('total_improvement_pct', 0):+.2f}%")
-                                    with col4:
-                                        st.metric("Avg Improvement/Cycle", f"{stats.get('avg_improvement_per_cycle_pct', 0):+.2f}%")
-                                
-                                # Auto-route to Analysis Agent if enabled
-                                if st.session_state.get("auto_route_to_analysis", False):
-                                    st.info("Routing to Analysis Agent...")
-                                    st.session_state.next_agent = "analysis"
-                                    st.rerun()
-                            else:
-                                st.warning(
-                                    f"ML Model execution failed: {ml_result.get('error', 'Unknown error')}"
-                                )
-                        except Exception as e:
-                            st.warning(f"Automatic ML model execution failed: {str(e)}")
-                            import traceback
-                            st.exception(e)
+                if auto_ml_enabled:
+                    st.session_state.workflow_curve_fitting_completed = True
+                    st.session_state.workflow_step = "ml_models"
+                    st.success("Curve fitting complete. Switching to ML Models...")
+                    st.switch_page("pages/ml_models.py")
 
                 # Display summary
                 col1, col2, col3 = st.columns(3)
@@ -1614,11 +1550,13 @@ if run_button or auto_run_triggered:
                                 key=csv_key
                             )
 
-                # Workflow: route to ML Models after curve fitting completes
+                # Workflow: offer manual Continue button (no auto-switch)
                 if st.session_state.get("workflow_active"):
                     st.session_state.workflow_curve_fitting_completed = True
                     st.session_state.workflow_step = "ml_models"
-                    st.switch_page("pages/ml_models.py")
+                    st.divider()
+                    if st.button("Continue to ML Models →", type="primary", use_container_width=True, key="cf_continue_ml"):
+                        st.switch_page("pages/ml_models.py")
 
             else:
                 st.error(f"❌ Analysis failed: {result.get('error', 'Unknown error')}")

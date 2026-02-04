@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import streamlit as st
@@ -120,10 +121,103 @@ def _reset_workflow_state() -> None:
     st.session_state.stage = "initial"
 
 
-tab_run, tab_build = st.tabs(["Run Workflow", "Build Workflow"])
+tab_run, tab_build, tab_demo = st.tabs(["Run Workflow", "Build Workflow", "🧪 Demo"])
+
+with tab_demo:
+    st.subheader(" Demo Workflow – All Agents Working Together")
+    
+    if st.button("Run Demo Workflow", type="primary", use_container_width=True, key="run_demo_wf"):
+        with st.spinner("Generating demo data and priming all agents..."):
+            try:
+                from tools.demo_data_generator import generate_demo_dataset, generate_demo_worklist
+
+                # Create demo output directory
+                project_root = Path(__file__).parent.parent
+                demo_dir = project_root / "results" / "demo"
+                demo_dir.mkdir(parents=True, exist_ok=True)
+                output_dir = str(demo_dir)
+
+                # Generate spectral + composition CSV
+                spectral_path, comp_path = generate_demo_dataset(n_wells=15, output_dir=output_dir)
+                wells_demo = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12", "B1", "B2", "B3"]
+                st.session_state.selected_wells = set(wells_demo)
+
+                # ---- Pre-populate Hypothesis Agent outputs (memory) ----
+                demo_hypothesis = (
+                    "Varying the ratio of PEA2PbI4 to FAPbI3 will systematically shift the PL emission peak. "
+                    "We hypothesize a monotonic relationship between composition and wavelength from ~450–850 nm."
+                )
+                demo_clarified = "How does the PEA2PbI4/FAPbI3 composition ratio affect PL emission wavelength?"
+                demo_socratic = (
+                    "What mechanisms drive the wavelength shift with composition? "
+                    "How can we map composition space efficiently?"
+                )
+                memory.insert_interaction("assistant", demo_hypothesis, "hypothesis", "demo")
+                memory.insert_interaction("user", demo_clarified, "clarified_question", "demo")
+                memory.insert_interaction("assistant", demo_socratic, "socratic_pass", "demo")
+                st.session_state.hypothesis_ready = True
+                st.session_state.last_hypothesis = demo_hypothesis
+
+                # ---- Pre-populate Experiment Agent outputs ----
+                max_vol = st.session_state.experimental_constraints.get("liquid_handling", {}).get("max_volume_per_mixture", 50)
+                worklist_csv = generate_demo_worklist(comp_path, max_vol)
+                demo_plan = (
+                    "Initial screening of 15 PEA2PbI4/FAPbI3 compositions across A1–B3. "
+                    "Fluorescence spectra 450–900 nm. Goal: map composition vs PL peak wavelength."
+                )
+                demo_outputs = {
+                    "plan": demo_plan,
+                    "worklist": worklist_csv,
+                    "layout": "A1–A12, B1–B3 (96-well plate)",
+                    "protocol": "PL measurement protocol (synthetic demo).",
+                }
+                st.session_state.experimental_outputs = demo_outputs
+                st.session_state.workflow_experiment_outputs = demo_outputs
+
+                # ---- Configure curve fitting → ML → Analysis flow ----
+                st.session_state.demo_workflow_running = True
+                st.session_state.auto_run_curve_fitting = True
+                st.session_state.auto_run_data_file = spectral_path
+                st.session_state.auto_run_comp_file = comp_path
+                st.session_state.auto_run_params = {
+                    "wells_to_analyze": wells_demo,
+                    "reads_to_analyze": "1",
+                    "read_type": "em_spectrum",
+                    "max_peaks": 4,
+                    "r2_target": 0.90,
+                    "max_attempts": 3,
+                    "api_delay_seconds": 0.5,
+                }
+                st.session_state.manual_workflow = [
+                    "Hypothesis Agent", "Experiment Agent", "Curve Fitting",
+                    "ML Models", "Analysis Agent", "Experiment Agent"
+                ]
+                st.session_state.workflow_auto_flags = {
+                    "Curve Fitting": False,
+                    "ML Models": False,
+                    "Analysis Agent": False,
+                }
+                st.session_state.workflow_ml_model_choice = "Single-objective GP (scikit-learn)"
+                st.session_state.optimization_model_choice = "Single-objective GP (scikit-learn)"
+                st.session_state.ml_model_config = {"target": "peak_1_wavelength", "beta": 2.0, "n_candidates": 20}
+                st.session_state.auto_ml_after_curve_fitting = True
+                st.session_state.auto_route_to_analysis = False
+                st.session_state.research_goal = (
+                    "Optimize PL peak wavelength for target emission. "
+                    "Synthetic data has peaks varying 450–850 nm with composition."
+                )
+                st.session_state.workflow_active = True
+                st.session_state.workflow_step = "curve_fitting"
+
+                st.success("All agents primed. You control the flow — run Curve Fitting, then use Continue buttons to move forward.")
+                st.switch_page("pages/curve_fitting.py")
+            except Exception as e:
+                st.error(f"Demo setup failed: {e}")
+                import traceback
+                st.exception(e)
 
 with tab_run:
-    st.subheader("🚀 Workflow Runner")
+    st.subheader(" Workflow Runner")
     st.markdown("Start an end-to-end workflow: Hypothesis → Experiment → Curve Fitting → ML Models → Analysis.")
 
     st.markdown("#### 🧭 Routing")
@@ -165,37 +259,38 @@ with tab_run:
     if not st.session_state.get("workflow_active", False):
         st.info("Start the workflow to begin the Hypothesis Agent.")
     else:
-        st.markdown(
-            f"**Current Step:** `{st.session_state.workflow_step}`"
-        )
-
-        if st.session_state.workflow_step == "hypothesis":
-            st.subheader("🧠 Hypothesis Agent")
-            st.switch_page("pages/hypothesis.py")
-
-        if st.session_state.workflow_step == "experiment":
-            st.subheader("🧪 Experiment Agent")
-            st.switch_page("pages/experiment.py")
-
-        if st.session_state.workflow_step == "curve_fitting":
-            st.subheader("📈 Curve Fitting")
-            st.switch_page("pages/curve_fitting.py")
-
-        if st.session_state.workflow_step == "ml_models":
-            st.subheader("🤖 ML Models")
-            st.switch_page("pages/ml_models.py")
-
-        if st.session_state.workflow_step == "analysis":
-            st.subheader("🔎 Analysis Agent")
-            st.switch_page("pages/analysis.py")
+        st.markdown(f"**Current Step:** `{st.session_state.workflow_step}`")
+        st.markdown("Navigate to any step — no automatic redirect. You control the flow.")
+        st.divider()
+        nav_cols = st.columns(5)
+        with nav_cols[0]:
+            if st.button("🧠 Hypothesis", use_container_width=True, key="nav_hypothesis"):
+                st.session_state.workflow_step = "hypothesis"
+                st.switch_page("pages/hypothesis.py")
+        with nav_cols[1]:
+            if st.button("🧪 Experiment", use_container_width=True, key="nav_experiment"):
+                st.session_state.workflow_step = "experiment"
+                st.switch_page("pages/experiment.py")
+        with nav_cols[2]:
+            if st.button("📈 Curve Fitting", use_container_width=True, key="nav_curve"):
+                st.session_state.workflow_step = "curve_fitting"
+                st.switch_page("pages/curve_fitting.py")
+        with nav_cols[3]:
+            if st.button("🤖 ML Models", use_container_width=True, key="nav_ml"):
+                st.session_state.workflow_step = "ml_models"
+                st.switch_page("pages/ml_models.py")
+        with nav_cols[4]:
+            if st.button("🔎 Analysis", use_container_width=True, key="nav_analysis"):
+                st.session_state.workflow_step = "analysis"
+                st.switch_page("pages/analysis.py")
 
 with tab_build:
-    st.subheader("🏗️ Workflow Builder")
+    st.subheader(" Workflow Builder")
     st.markdown("Create custom workflows and mark steps for automatic execution.")
 
     # Sidebar for workflow management
     with st.sidebar:
-        st.header("💾 Saved Workflows")
+        st.header(" Saved Workflows")
 
         # List saved workflows
         if st.session_state.workflows:

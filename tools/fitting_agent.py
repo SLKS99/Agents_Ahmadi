@@ -1066,9 +1066,16 @@ def save_fitting_plot_png(x: np.ndarray, y: np.ndarray, fit_result: PeakFitResul
     # Top plot: Original data
     ax1.plot(x, y, 'b-', linewidth=2, label='Original data', alpha=0.8)
 
-    # Use the actual lmfit result for the fit
+    # Use the actual lmfit result for the fit.
+    # Evaluate at x explicitly: best_fit can have different length when nan_policy='omit' drops NaNs.
     if hasattr(fit_result, 'lmfit_result') and fit_result.lmfit_result is not None:
-        fit_y = fit_result.lmfit_result.best_fit
+        try:
+            fit_y = fit_result.lmfit_result.eval(x=x)
+        except Exception:
+            fit_y = fit_result.lmfit_result.best_fit
+        # Ensure same length as x (eval should match, but guard against edge cases)
+        if len(fit_y) != len(x):
+            fit_y = np.interp(np.arange(len(x)), np.linspace(0, len(x) - 1, len(fit_y)), fit_y)
         
         # Plot individual peak components from lmfit
         colors = ['green', 'orange', 'purple', 'brown', 'pink', 'gray']
@@ -1801,7 +1808,10 @@ def run_complete_analysis(
 
             # LLM refinement based on residuals
             if fit_result.lmfit_result is not None:
-                current_residuals = y_smoothed - fit_result.lmfit_result.best_fit
+                fit_y = fit_result.lmfit_result.eval(x=x)
+                if len(fit_y) != len(y_smoothed):
+                    fit_y = np.interp(np.arange(len(y_smoothed)), np.linspace(0, len(y_smoothed) - 1, len(fit_y)), fit_y)
+                current_residuals = y_smoothed - fit_y
                 
                 # Manual boost if residuals are huge (Residual peak > 20% of data peak)
                 y_max = np.nanmax(y_smoothed)
@@ -2352,6 +2362,67 @@ def fit_peaks_lmfit_with_retry(
 
 # ---------- Dataset curation (reads/wells/wavelengths) ----------
 
+
+def infer_wells_from_file_metadata(file_path: str) -> Optional[List[str]]:
+    """
+    Infer wells to analyze from plate reader metadata in CSV/Excel.
+    Looks for patterns like:
+    - "Full Plate" -> 96 wells (A1-H12)
+    - "35 slideglass" -> 35 wells (A1-E7)
+    - "A1..A7" or "A1..B3" -> parse range
+    Returns None if metadata cannot be inferred (caller uses all columns).
+    """
+    try:
+        content = ""
+        path_lower = file_path.lower()
+        if path_lower.endswith('.csv'):
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read(8000)  # First ~8KB
+        elif path_lower.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(file_path, sheet_name=0, header=None)
+            content = df.astype(str).to_csv(sep='\t', index=False, header=False)[:8000]
+        else:
+            return None
+
+        content_upper = content.upper()
+        lines = [line.strip() for line in content.split('\n') if line.strip()][:50]
+
+        # "Full Plate" or "96 WELL PLATE" -> 96 wells
+        if 'FULL PLATE' in content_upper or '96 WELL PLATE' in content_upper:
+            rows_96 = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+            cols_96 = list(range(1, 13))
+            return [f"{r}{c}" for r in rows_96 for c in cols_96]
+
+        # "35 slideglass" or "35 slide glass" -> A1-E7
+        if '35 SLIDEGLASS' in content_upper or '35 SLIDE GLASS' in content_upper:
+            rows_35 = ['A', 'B', 'C', 'D', 'E']
+            cols_35 = list(range(1, 8))
+            return [f"{r}{c}" for r in rows_35 for c in cols_35]
+
+        # "A1..A7" or "A1..B3" range pattern
+        range_pat = re.compile(r'([A-H])(\d+)\.\.([A-H])(\d+)', re.I)
+        for line in lines:
+            m = range_pat.search(line)
+            if m:
+                r1, c1, r2, c2 = m.group(1).upper(), int(m.group(2)), m.group(3).upper(), int(m.group(4))
+                rows = list('ABCDEFGH')
+                r_start, r_end = rows.index(r1), rows.index(r2)
+                if r_start > r_end:
+                    r_start, r_end = r_end, r_start
+                if c1 > c2:
+                    c1, c2 = c2, c1
+                wells = []
+                for r in rows[r_start:r_end + 1]:
+                    for c in range(c1, c2 + 1):
+                        wells.append(f"{r}{c}")
+                if wells:
+                    return wells
+
+        return None
+    except Exception:
+        return None
+
+
 @dataclass
 class CurveFittingConfig:
     data_csv: Optional[str] = None
@@ -2464,12 +2535,20 @@ class CurveFitting:
     @classmethod
     def _find_read_block_starts(cls, data: pd.DataFrame) -> Dict[int, int]:
         """Find the start row of every 'Read N:' block to determine boundaries."""
-        starts: Dict[int, int] = {}
-        first_col = data.iloc[:, 0].astype(str)
-        for idx, val in first_col.items():
-            m = cls.READ_HEADER_PATTERN.match(val)
-            if m:
-                starts[int(m.group(1))] = idx
+        def scan_column(col_series) -> Dict[int, int]:
+            found: Dict[int, int] = {}
+            for idx, val in col_series.items():
+                val = str(val).strip()
+                if val.lower() in ('nan', 'none', ''):
+                    continue
+                m = cls.READ_HEADER_PATTERN.match(val)
+                if m:
+                    found[int(m.group(1))] = idx
+            return found
+
+        starts = scan_column(data.iloc[:, 0].astype(str))
+        if not starts and data.shape[1] > 1:
+            starts = scan_column(data.iloc[:, 1].astype(str))
         if not starts:
             raise ValueError("No 'Read N:' blocks found in data CSV")
         return dict(sorted(starts.items()))
@@ -2757,10 +2836,37 @@ class CurveFitting:
         # LAST RESORT: Index-based (shouldn't happen with proper CSV)
         return np.arange(data_length)
 
+    def _parse_emission_metadata_from_file(self, file_path: Optional[str]) -> Optional[Tuple[float, float, float]]:
+        """
+        Parse 'Emission Start: X nm, Stop: Y nm, Step: Z nm' from Cytation CSV.
+        Returns (wl_min, wl_max, step) or None.
+        """
+        if not file_path or not os.path.exists(file_path):
+            return None
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read(12000)
+            # Match "Emission Start: 450/20 nm,  Stop: 900 nm,  Step: 1 nm" or similar
+            start_m = re.search(r'Emission\s+Start:\s*(\d+)(?:/\d+)?\s*nm', content, re.I)
+            stop_m = re.search(r'Stop:\s*(\d+)\s*nm', content, re.I)
+            step_m = re.search(r'Step:\s*(\d+(?:\.\d+)?)\s*nm', content, re.I)
+            if start_m and stop_m and step_m:
+                wl_min = float(start_m.group(1))
+                wl_max = float(stop_m.group(1))
+                step = float(step_m.group(1))
+                if wl_min < wl_max and step > 0:
+                    return (wl_min, wl_max, step)
+        except Exception:
+            pass
+        return None
+
     def stack_blocks(self, blocks: Dict[int, pd.DataFrame]) -> Tuple[np.ndarray, np.ndarray, List[str], List[int], Dict[int, np.ndarray]]:
         # Filter out non-well columns (like "Wavelength", "WAVELENGTH", etc.)
         def is_well_column(col: str) -> bool:
             col_upper = str(col).strip().upper()
+            # Exclude invalid/placeholder column names
+            if col_upper in ('NAN', 'NONE', '') or col_upper.startswith('UNNAMED'):
+                return False
             # Exclude wavelength-related columns
             if col_upper in ['WAVELENGTH', 'WAVELENGTH (NM)', 'WAVELENGTH_NM', 'WL']:
                 return False
@@ -2787,6 +2893,8 @@ class CurveFitting:
         common_wells = sorted(set.intersection(*well_sets)) if well_sets else []
         if not common_wells:
             common_wells = sorted(set.union(*well_sets)) if well_sets else []
+        # Remove any invalid well names (e.g. 'nan' from header parsing)
+        common_wells = [w for w in common_wells if str(w).strip().upper() not in ('NAN', 'NONE', '')]
 
         read_indices = sorted(blocks.keys())
         num_reads = len(read_indices)
@@ -2801,20 +2909,42 @@ class CurveFitting:
         
         num_wells = len(common_wells)
         
-        # Build wavelength arrays PER READ (each read may have different wavelength ranges)
-        # Store them in a dict keyed by read number
+        # Build wavelength: prefer emission metadata from file (450-900, step 1) over block inference
+        # Cytation exports specify "Emission Start: 450/20 nm, Stop: 900 nm, Step: 1 nm"
+        emission_range = self._parse_emission_metadata_from_file(self.cfg.data_csv)
+        expected_n_pts = None
+        if emission_range:
+            wl_min, wl_max, step = emission_range
+            # Build master wavelength array from metadata
+            n_pts = int(round((wl_max - wl_min) / step)) + 1
+            x = np.linspace(wl_min, wl_max, n_pts)
+            expected_n_pts = n_pts
+            print(f"  Wavelength from emission metadata: {wl_min:.1f}-{wl_max:.1f} nm, step {step:.1f} ({len(x)} points)")
+        else:
+            # Fallback: use shortest read's inferred range (avoids last-read parsing errors)
+            shortest_read_idx = read_lengths.index(min(read_lengths))
+            exemplar_read = read_indices[shortest_read_idx]
+            exemplar = blocks[exemplar_read]
+            x = self.build_wavelengths(exemplar)
+            wl_min, wl_max = float(x.min()), float(x.max())
+            print(f"  Wavelength from read {exemplar_read}: {wl_min:.1f}-{wl_max:.1f} nm ({len(x)} points)")
+
+        # When emission metadata exists, cap max_wavelengths to expected (avoids Read 50 parsing bloat)
+        if expected_n_pts is not None and max_wavelengths > expected_n_pts:
+            print(f"  Capping wavelength dimension to {expected_n_pts} (emission metadata); Read 50+ had {max_wavelengths} rows")
+            max_wavelengths = expected_n_pts
+            x = np.linspace(wl_min, wl_max, max_wavelengths)
+
+        # All reads use same output range; shorter reads get linspace over that range
         read_wavelengths = {}
         for r in read_indices:
-            read_df = blocks[r]
-            read_wl = self.build_wavelengths(read_df)
-            read_wavelengths[r] = read_wl
-            print(f"  Read {r} wavelength range: {read_wl.min():.1f}-{read_wl.max():.1f} nm ({len(read_wl)} points)")
-        
-        # Use the longest read's wavelength array as the "master" for tensor dimensions
-        # But we'll use per-read wavelengths when extracting data
-        longest_read_idx = read_lengths.index(max_wavelengths)
-        exemplar = blocks[read_indices[longest_read_idx]]
-        x = self.build_wavelengths(exemplar)
+            actual_len = min(len(blocks[r]), max_wavelengths)
+            if actual_len == len(x):
+                read_wavelengths[r] = x.copy()
+            else:
+                read_wavelengths[r] = np.linspace(wl_min, wl_max, actual_len)
+            r_wl = read_wavelengths[r]
+            print(f"  Read {r} wavelength range: {r_wl.min():.1f}-{r_wl.max():.1f} nm ({len(r_wl)} points)")
 
         # Use the maximum length to avoid broadcasting errors
         tensor = np.full((num_reads, max_wavelengths, num_wells), fill_value=np.nan, dtype=float)
@@ -2832,13 +2962,9 @@ class CurveFitting:
                     f"Common wells: {common_wells}, Read columns: {list(df.columns)}"
                 )
             
-            # Only assign up to the actual length of this read
-            # Shorter reads will have NaN padding at the end (converted to fill_na_value)
-            if actual_length <= max_wavelengths:
-                tensor[i, :actual_length, :] = arr
-            else:
-                # If somehow longer (shouldn't happen), truncate
-                tensor[i, :max_wavelengths, :] = arr[:max_wavelengths, :]
+            # Truncate to max_wavelengths when emission metadata caps it (e.g. Read 50 had extra rows)
+            copy_len = min(actual_length, max_wavelengths)
+            tensor[i, :copy_len, :] = arr[:copy_len, :]
 
         tensor = np.nan_to_num(tensor, nan=self.cfg.fill_na_value)
         
